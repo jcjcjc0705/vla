@@ -54,29 +54,33 @@ def main():
         for _ in range(steps):
             scene.step(render=render)
 
-    # ── 1. open the gripper at home, then hand it the cube ─────────────
+    # ── 1. open the gripper at home ────────────────────────────────────
     scene.reset(seed=0, cube_pose=(np.array([1.0, 0.0, 0.5]), None))  # park it away
     q[gi] = grip["open"]
     scene.set_targets(q)
     settle(60)
 
-    ee = scene.ee_position()
-    print(f"夾爪張開後 EE 位置 = {np.round(ee, 4)}")
-    scene.place_cube(ee)                     # cube straight into the jaws
-    settle(10)
+    before = scene.grasp_point()
+    print(f"夾爪張開後 EE = {np.round(scene.ee_position(), 4)}   "
+          f"夾持點 = {np.round(before, 4)}")
 
-    before = scene.cube_pose()[0].copy()
-    print(f"方塊置入 = {np.round(before, 4)}")
-
-    # ── 2. close ───────────────────────────────────────────────────────
+    # ── 2. close, pinning the cube until the fingers meet ──────────────
+    # A cube released into an open gripper free-falls the ~200 mm to the floor
+    # in 0.2 s, long before the fingers close. Hold it at the grasp point while
+    # they close, then let go -- what is being tested is whether the *closed*
+    # gripper holds it, not whether it can catch.
+    scene.place_cube(before)
     q[gi] = grip["grasp"]
     scene.set_targets(q)
+    for _ in range(200):
+        scene.place_cube(before)
+        scene.step()
     settle(90)
     after_close = scene.cube_pose()[0].copy()
     d = scene.diagnose()
-    print(f"夾合後     = {np.round(after_close, 4)}   "
+    print(f"放手後     = {np.round(after_close, 4)}   "
           f"掉落 {(before[2] - after_close[2]) * 1000:+.1f} mm   "
-          f"距 EE {d['ee_dist'] * 1000:.1f} mm")
+          f"夾爪停在 {scene.joint_positions()[gi]:+.4f} rad")
 
     holding = d["ee_dist"] < cfg["success"]["max_ee_distance"]
     if not holding:
@@ -118,9 +122,10 @@ def main():
         print("△  夾住了但沒通過抬升判定。先看上面哪一項沒達標:")
         print("   高度不夠 → 抬升幅度太小;距 EE 太遠 → 抬升途中滑脫")
     else:
-        print("✗ 夾不住。依序試(每次只改一項,改完重跑 build_scene.py):")
-        print("   1. cube.mass 15 g → 8 g")
-        print("   2. overrides.gripper_drive.stiffness 625 → 2000 → 5000")
+        print("✗ 夾不住。**先查被動指**,不要動 drive stiffness ——")
+        print("   2026-08-05 實測:drive 32 倍、方塊 1/3 重,結果完全沒變。")
+        print("   1. overrides.mimic_joint.natural_frequency 往上調(已知 1000 可行)")
+        print("   2. cube.mass 減輕")
         print("   3. overrides.finger_colliders.approximation → convexDecomposition")
         print("   4. overrides.pads.enabled → true")
     print("=" * 62)
