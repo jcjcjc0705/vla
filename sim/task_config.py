@@ -54,16 +54,16 @@ class Config:
         self.raw = yaml.safe_load(task_file.read_text())
 
         paths = self.raw["paths"]
-        self.omx_sim2real = _resolve(
-            paths["omx_sim2real"], paths["robot_usd"], "omx_sim2real"
+        self.omx_bridge = _resolve(
+            paths["omx_bridge"], paths["robot_usd"], "omx_bridge_image"
         )
         self.bridge_root = _resolve(
             paths["sim_real_bridge"], "sim_real_bridge/profile.py", "sim_real_bridge"
         )
 
-        self.robot_usd = self.omx_sim2real / paths["robot_usd"]
-        self.robot_urdf = self.omx_sim2real / paths["robot_urdf"]
-        self.profile_path = self.omx_sim2real / paths["profile"]
+        self.robot_usd = self.omx_bridge / paths["robot_usd"]
+        self.robot_urdf = self.omx_bridge / paths["robot_urdf"]
+        self.profile_path = self.omx_bridge / paths["profile"]
         self.scene_usd = REPO_ROOT / paths["scene_usd"]
 
         self.joints = self._load_joints()

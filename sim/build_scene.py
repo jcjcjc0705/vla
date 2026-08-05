@@ -200,8 +200,9 @@ def build(cfg: task_config.Config, force: bool) -> int:
         return 0
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    # Relative so the pair moves together. vla/ and omx_sim2real/ sit side by
-    # side on both machines, so the same relative path resolves on each.
+    # Relative so the pair moves together, and resolved from wherever
+    # task_config found omx_bridge_image -- see paths.omx_bridge in the task
+    # yaml for the candidates tried.
     rel = os.path.relpath(cfg.robot_usd, out.parent)
 
     stage = Usd.Stage.CreateNew(str(out))
