@@ -30,7 +30,7 @@ import os
 import sys
 from pathlib import Path
 
-from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import task_config  # noqa: E402
@@ -84,7 +84,13 @@ def define_cube(stage, path, spec, material):
     cube.CreateDisplayColorAttr([Gf.Vec3f(*spec["color"])])
     # Spawned properly by scene.py each episode; this is just a sane resting
     # place so the generated stage opens with the cube visible on the ground.
-    UsdGeom.Xformable(cube).AddTranslateOp().Set(Gf.Vec3d(0.21, 0.0, size / 2))
+    # Both ops are authored even though the resting pose needs neither rotated
+    # nor animated: an episode reset over the ROS prim service can only *write*
+    # attributes that already exist, so a cube with no orient op could never be
+    # given a yaw from outside Isaac.
+    x = UsdGeom.Xformable(cube)
+    x.AddTranslateOp().Set(Gf.Vec3d(0.21, 0.0, size / 2))
+    x.AddOrientOp().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
 
     prim = cube.GetPrim()
     UsdPhysics.RigidBodyAPI.Apply(prim)
@@ -193,6 +199,61 @@ def hide_prim(stage, prim_path, report):
     return True
 
 
+def add_cube_tf_nodes(stage, cfg, report):
+    """Put the cube's pose on ROS, in both directions.
+
+    ``omx_f.usd``'s ActionGraph already publishes ``/joint_states`` and subscribes
+    ``/joint_command`` -- that is how ``jog`` drives the twin. So the *arm* was
+    always reachable from outside Isaac, but nothing could say where the cube is
+    or put it somewhere, and that is most of what running an episode means.
+
+    Two stock nodes close the gap, and they speak **standard** ``tf2_msgs``:
+    nothing needs Isaac's custom service package, which matters because this base
+    image has no interface-generation tooling to rebuild it for Jazzy.
+
+    The two use **different topics on purpose**. Sharing ``/tf`` would feed the
+    publisher's output straight back into the subscriber, which pins the cube to
+    wherever it already is -- a reset that silently does nothing.
+    """
+    graph = f"{cfg.robot_root}/ActionGraph"
+    if not stage.GetPrimAtPath(graph).IsValid():
+        report.append(f"FAIL  找不到 {graph} —— sublayer 沒帶進 ActionGraph")
+        return False
+    tick = Sdf.Path(f"{graph}/on_playback_tick.outputs:tick")
+    cube = f"{cfg.task_root}/cube"
+
+    pub = stage.DefinePrim(f"{graph}/ros2_publish_cube_tf", "OmniGraphNode")
+    pub.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
+        "isaacsim.ros2.bridge.ROS2PublishTransformTree")
+    pub.CreateAttribute("node:typeVersion", Sdf.ValueTypeNames.Int).Set(1)
+    pub.CreateAttribute("inputs:execIn", Sdf.ValueTypeNames.UInt).AddConnection(tick)
+    pub.CreateAttribute("inputs:timeStamp", Sdf.ValueTypeNames.Double).AddConnection(
+        Sdf.Path(f"{graph}/isaac_read_simulation_time.outputs:simulationTime"))
+    pub.CreateAttribute("inputs:topicName", Sdf.ValueTypeNames.String).Set(
+        cfg["ros"]["cube_tf_topic"])
+    pub.CreateRelationship("inputs:targetPrims").SetTargets([Sdf.Path(cube)])
+    pub.CreateAttribute("ui:nodegraph:node:pos", Sdf.ValueTypeNames.Float2).Set(
+        Gf.Vec2f(631.0, 120.0))
+
+    sub = stage.DefinePrim(f"{graph}/ros2_subscribe_cube_tf", "OmniGraphNode")
+    sub.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
+        "isaacsim.ros2.bridge.ROS2SubscribeTransformTree")
+    sub.CreateAttribute("node:typeVersion", Sdf.ValueTypeNames.Int).Set(1)
+    sub.CreateAttribute("inputs:execIn", Sdf.ValueTypeNames.UInt).AddConnection(tick)
+    sub.CreateAttribute("inputs:topicName", Sdf.ValueTypeNames.String).Set(
+        cfg["ros"]["cube_set_topic"])
+    # [prim_path, frame_name, ...] -- publish a transform whose child_frame_id is
+    # this frame name and the prim moves there.
+    sub.CreateAttribute("inputs:frameNamesMap", Sdf.ValueTypeNames.TokenArray).Set(
+        [cube, cfg["ros"]["cube_frame"]])
+    sub.CreateAttribute("ui:nodegraph:node:pos", Sdf.ValueTypeNames.Float2).Set(
+        Gf.Vec2f(631.0, 260.0))
+
+    report.append(f"  ok  {graph}/ros2_publish_cube_tf   -> {cfg['ros']['cube_tf_topic']}")
+    report.append(f"  ok  {graph}/ros2_subscribe_cube_tf <- {cfg['ros']['cube_set_topic']}")
+    return True
+
+
 def build(cfg: task_config.Config, force: bool) -> int:
     out = cfg.scene_usd
     if out.exists() and not force:
@@ -253,6 +314,7 @@ def build(cfg: task_config.Config, force: bool) -> int:
         override_attr(stage, p, "physics:approximation", fc["approximation"], report)
 
     hidden_ok = all(hide_prim(stage, p, report) for p in ov["hide"]["prims"])
+    service_ok = add_cube_tf_nodes(stage, cfg, report)
 
     stage.GetRootLayer().Save()
 
@@ -288,7 +350,7 @@ def build(cfg: task_config.Config, force: bool) -> int:
         if not check.GetPrimAtPath(must).IsValid():
             print(f"FAIL  少了 {must}")
             ok = False
-    if not hidden_ok:
+    if not (hidden_ok and service_ok):
         ok = False
     for p in ov["hide"]["prims"]:
         # Check the path that was **asked** for, on a fresh open -- not the path
