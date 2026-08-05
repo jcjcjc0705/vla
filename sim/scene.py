@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import spawn        # noqa: E402
 import task_config  # noqa: E402
 
 
@@ -83,30 +84,14 @@ class PickCubeScene:
 
     # ── episode ────────────────────────────────────────────────────────
     def sample_cube_pose(self, seed: int, holdout: bool = False):
-        """Cube pose for one episode, drawn from the spawn annulus.
+        """Cube pose for one episode, from the shared sampler in ``spawn.py``.
 
-        ``holdout`` draws from the theta band deliberately kept out of training.
-        Evaluating there is what distinguishes a policy that looks at the image
-        from one that has memorised an average trajectory.
+        Seeded per episode here so a given seed always reproduces the same pose,
+        which is what makes a failing episode re-runnable.
         """
-        s = self.cfg["spawn"]
-        rng = np.random.default_rng(seed)
-        band = s["holdout_theta_deg"] if holdout else s["theta_deg"]
-        if not holdout:
-            # Training draws from the full sweep minus the held-out band.
-            lo, hi = s["holdout_theta_deg"]
-            while True:
-                th = rng.uniform(*band)
-                if not (lo <= th <= hi):
-                    break
-        else:
-            th = rng.uniform(*band)
-        r = rng.uniform(*s["radius"])
-        yaw = math.radians(rng.uniform(*s["yaw_deg"]))
-        th = math.radians(th)
-        pos = np.array([r * math.cos(th), r * math.sin(th), self.cfg["cube"]["size"] / 2])
-        quat = np.array([math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)])  # w,x,y,z
-        return pos, quat
+        pos, yaw, _, _ = spawn.sample_cube_pose(
+            self.cfg, np.random.default_rng(seed), holdout)
+        return pos, spawn.yaw_quat(yaw)
 
     def reset(self, seed: int = 0, holdout: bool = False, cube_pose=None):
         """Home the arm, place the cube, let it settle."""

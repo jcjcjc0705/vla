@@ -15,6 +15,8 @@ from pathlib import Path
 
 import yaml
 
+import spawn as _spawn
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TASK_FILE = REPO_ROOT / "task" / "pick_cube.task.yaml"
 
@@ -112,8 +114,7 @@ class Config:
             f"joints({len(self.joints)}): {', '.join(self.joints)}",
             f"cube     : {c['size'] * 1000:.0f} mm, {c['mass'] * 1000:.0f} g, "
             f"摩擦 {c['static_friction']}",
-            f"spawn    : r={s['radius']} m, theta={s['theta_deg']}°, "
-            f"保留區 {s['holdout_theta_deg']}°",
+            f"spawn    : r={s['radius']} m, {_spawn.describe(self)}",
         ])
 
 

@@ -81,8 +81,8 @@ class OMXKinematics:
             raise ValueError(f"關節軸序列變成 {self.axes},解析解的假設不再成立")
 
         # Pinch point in link5's frame.
-        ee = origin("end_effector_joint")
-        self.tool_local = ee + np.array(cfg["gripper"]["grasp_offset"])
+        self.ee_local = origin("end_effector_joint")
+        self.tool_local = self.ee_local + np.array(cfg["gripper"]["grasp_offset"])
 
         # ── the constants the planar solve needs ────────────────────────
         # Yaw axis passes through origins[0] (the offset is applied before the
@@ -104,6 +104,15 @@ class OMXKinematics:
         self.reach = self.L1 + self.L2 + self.L4x + np.linalg.norm(self.tool_local)
 
     # ── forward ────────────────────────────────────────────────────────
+    def link5_frame(self, q):
+        """``(origin, R)`` of link5 in world coordinates."""
+        p = np.zeros(3)
+        R = np.eye(3)
+        for i, (off, ax) in enumerate(zip(self.origins, self.axes)):
+            p = p + R @ off
+            R = R @ _rot(ax, q[i])
+        return p, R
+
     def fk(self, q):
         """Tool position and the link origins, in world coordinates."""
         p = np.zeros(3)
@@ -114,6 +123,25 @@ class OMXKinematics:
             R = R @ _rot(ax, q[i])
             points.append(p.copy())
         return p + R @ self.tool_local, np.array(points)
+
+    def in_ee(self, q, world_point):
+        """``world_point`` in the **end_effector_link** frame.
+
+        This is the frame ``gripper.grasp_offset`` is written in, so a measured
+        value can be compared with the configured one directly. Measuring in
+        link5's frame instead is off by the fixed 91.9 mm end-effector joint
+        offset -- a difference big enough to look like a catastrophe and small
+        enough in the other axes to look plausible.
+
+        ``end_effector_joint`` carries no rotation, so the two frames share an
+        orientation and this is a translation only.
+        """
+        p, R = self.link5_frame(q)
+        return R.T @ (np.asarray(world_point, dtype=float) - p) - self.ee_local
+
+    def in_link5(self, q, world_point):
+        p, R = self.link5_frame(q)
+        return R.T @ (np.asarray(world_point, dtype=float) - p)
 
     # ── inverse ────────────────────────────────────────────────────────
     def _tool_in_link5(self, q5):
