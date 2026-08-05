@@ -182,6 +182,23 @@ class PickCubeScene:
     def ee_position(self):
         return np.asarray(self.ee.get_world_pose()[0])
 
+    def grasp_point(self):
+        """Where the fingers actually pinch, in world space.
+
+        ``end_effector_link`` sits slightly forward of and above the pinch, so
+        aiming at it directly puts the cube past the fingertips. The offset is
+        measured in the EE's own frame (see ``gripper.grasp_offset``) because the
+        world-space difference changes with the arm's pose while this does not.
+        """
+        pos, quat = self.ee.get_world_pose()
+        w, x, y, z = [float(v) for v in quat]
+        R = np.array([
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
+            [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
+        ])
+        return np.asarray(pos) + R @ np.asarray(self.cfg["gripper"]["grasp_offset"])
+
     # ── succeed ────────────────────────────────────────────────────────
     def success(self):
         """Lifted, still held, and stayed that way.
