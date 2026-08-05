@@ -91,6 +91,17 @@ overrides:
     joints: ["joint1", "joint2", "joint3", "joint4", "joint5"]
     stiffness: 625.0
     damping: 40.0
+  mimic_joint:
+    # gripper_joint_2 是被動指:它**沒有 drive**(apiSchemas 是空的),只靠
+    # PhysxMimicJoint 約束跟隨 gripper_joint_1。原廠 naturalFrequency=25 在
+    # 1/120 s 的步長下太軟 —— 夾到東西時被動指會被推開、落後,變成只有一根
+    # 手指在出力,怎麼調 drive stiffness 都夾不住。
+    #
+    # 調硬反而更貼近真實:真手臂第二指是齒輪連動的剛性連結,不是彈簧。
+    joint: "gripper_joint_2"
+    natural_frequency: 1000.0   # ← M1 要調的主要旋鈕(原廠 25 太軟)
+    damping_ratio: 0.8
+
   finger_colliders:
     # 手指是塊狀零件(扁平比 3.7),convexHull 不會保留出平整夾持面。
     # 順序:convexHull → convexDecomposition → 加 pad(見 pads)

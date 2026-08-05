@@ -172,6 +172,13 @@ def build(cfg: task_config.Config, force: bool) -> int:
                           g["stiffness"], report)
             override_attr(stage, p, "drive:angular:physics:damping",
                           g["damping"], report)
+    mj = ov["mimic_joint"]
+    mp = f"{cfg.robot_root}/joints/{mj['joint']}"
+    override_attr(stage, mp, "physxMimicJoint:rotZ:naturalFrequency",
+                  mj["natural_frequency"], report)
+    override_attr(stage, mp, "physxMimicJoint:rotZ:dampingRatio",
+                  mj["damping_ratio"], report)
+
     fc = ov["finger_colliders"]
     for p in fc["prims"]:
         override_attr(stage, p, "physics:approximation", fc["approximation"], report)
