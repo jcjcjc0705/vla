@@ -55,18 +55,20 @@ def define_camera(stage, path, spec, parent_relative=False):
     cam.CreateVerticalApertureAttr(aperture_v)
     cam.CreateClippingRangeAttr(Gf.Vec2f(*spec["clipping"]))
 
-    xf = UsdGeom.Xformable(cam)
-    if parent_relative:
-        # Wrist camera: a fixed offset from the link it rides on.
-        xf.AddTranslateOp().Set(Gf.Vec3d(*spec["translate"]))
-        xf.AddRotateXYZOp().Set(Gf.Vec3f(*spec["rotate_xyz_deg"]))
-    else:
-        # World camera: look-at. USD cameras face -Z, and SetLookAt returns a
-        # world->view matrix, so the camera's transform is its inverse.
-        view = Gf.Matrix4d().SetLookAt(
-            Gf.Vec3d(*spec["eye"]), Gf.Vec3d(*spec["target"]), Gf.Vec3d(0, 0, 1)
-        )
-        xf.AddTransformOp().Set(view.GetInverse())
+    # Both cameras are aimed with look-at rather than hand-turned Euler angles.
+    # The first wrist camera was written as a rotation and ended up facing
+    # backwards at the arm's base, then 13 degrees too high once the sign was
+    # fixed. Naming the point to look at cannot go wrong in either way.
+    #
+    # USD cameras face -Z, and SetLookAt returns a world->view matrix, so the
+    # camera's transform is its inverse. For a parented camera the same maths is
+    # done in the parent's frame.
+    eye, target = ((spec["translate"], spec["look_at"]) if parent_relative
+                   else (spec["eye"], spec["target"]))
+    view = Gf.Matrix4d().SetLookAt(
+        Gf.Vec3d(*eye), Gf.Vec3d(*target), Gf.Vec3d(0, 0, 1)
+    )
+    UsdGeom.Xformable(cam).AddTransformOp().Set(view.GetInverse())
     return cam
 
 
