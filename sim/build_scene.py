@@ -33,7 +33,7 @@ from pathlib import Path
 from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import config  # noqa: E402
+import task_config  # noqa: E402
 
 # USD cameras express aperture in tenths of a scene unit; 20.955 is the
 # 36 mm-film convention Isaac's own cameras use, so FOV maths lines up with
@@ -125,7 +125,7 @@ def override_attr(stage, prim_path, attr_name, value, report):
     return True
 
 
-def build(cfg: config.Config, force: bool) -> int:
+def build(cfg: task_config.Config, force: bool) -> int:
     out = cfg.scene_usd
     if out.exists() and not force:
         print(f"{out} 已存在。要重建請加 --force。")
@@ -219,8 +219,8 @@ def main():
     ap.add_argument("--force", action="store_true", help="覆蓋既有的 pick_cube.usd")
     args = ap.parse_args()
     try:
-        cfg = config.load()
-    except config.ConfigError as exc:
+        cfg = task_config.load()
+    except task_task_config.ConfigError as exc:
         print(f"[build_scene] {exc}")
         return 1
     print(cfg.summary(), "\n")

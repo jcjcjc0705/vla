@@ -33,4 +33,10 @@ fi
 
 export PYTHONPATH="$USDLIBS:${PYTHONPATH:-}"
 export LD_LIBRARY_PATH="$USDLIBS/bin:$ISAAC/kit:${LD_LIBRARY_PATH:-}"
+
+# Unbuffered, or nothing you print survives. Redirecting stdout to a file makes
+# print() block-buffered, and SimulationApp.close() ends the process hard enough
+# that the buffer is never flushed -- the run looks silent even when it worked.
+export PYTHONUNBUFFERED=1
+
 exec "$ISAAC/python.sh" "$@"
