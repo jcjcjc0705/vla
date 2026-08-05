@@ -142,7 +142,7 @@ torch 2.7 / CUDA 12.8,方向是對的。
 | 東西 | 筆電 | 伺服器 |
 |---|---|---|
 | 給伺服器 Claude 的簡報 | [`SERVER_CLAUDE_BRIEF.md`](SERVER_CLAUDE_BRIEF.md) | 同 |
-| Isaac 場景 / URDF / profile | `../omx_sim2real/` | `~/omx_vla/omx_sim2real/` |
+| Isaac 場景 / URDF / profile | `../../docker/robot/omx_bridge_image/` | `~/omx_vla/omx_bridge_image/` |
 | 同步引擎(關節順序的真相) | `../../docker/bridge/sim_real_bridge_image/` | `~/omx_vla/sim_real_bridge_image/` |
 | 相機內參換算工具 | `../../camera/cameracalibration/isaac_camera.py` | (只在筆電,不需要) |
 

@@ -8,14 +8,19 @@
 
 paths:
   # 相對於這個 repo 的根目錄。找不到時 config.py 會依序試 candidates。
-  omx_sim2real:
-    - "../omx_sim2real"                                   # 筆電 / 伺服器 clone 並排時
-    - "~/omx_vla/omx_sim2real"
+  # omx_bridge_image 這個 repo 的 checkout。它同時是 image 的來源,以及
+  # **原生 Isaac** 讀 USD/URDF 的來源 —— Isaac 不在容器裡跑,所以檔案還是要在
+  # host 上。用 image 的人可以這樣取出來:
+  #   docker run --rm -v "$PWD:/out" <image> cp -r /assets /out
+  omx_bridge:
+    - "../../docker/robot/omx_bridge_image"                # 筆電
+    - "../omx_bridge_image"                                # 伺服器並排 clone 時
+    - "~/omx_vla/omx_bridge_image"
   sim_real_bridge:                                        # 只為了 profile.py(關節順序的真相)
     - "../../docker/bridge/sim_real_bridge_image/bridge"   # 筆電
     - "../sim_real_bridge_image/bridge"                    # 伺服器
     - "~/omx_vla/sim_real_bridge_image/bridge"
-  # 相對於 omx_sim2real
+  # 相對於 omx_bridge_image
   robot_usd: "assets/omx_f.usd"
   robot_urdf: "assets/omx_f/omx_f.urdf"
   profile: "profile/omx_f.profile.yaml"

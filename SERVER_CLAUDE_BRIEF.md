@@ -63,7 +63,7 @@ driver 580.159.03(支援到 CUDA 13.0)、GPU 97,887 MiB。
 
 ```bash
 # 機器人資料層 — USD 場景、URDF+meshes、profile
-git clone https://github.com/jcjcjc0705/omx_sim2real.git
+git clone https://gitlab.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image.git
 
 # 同步引擎 — 只需要其中的 sim_real_bridge/profile.py
 git clone ssh://git@gitlab.screamtrumpet.csie.ncku.edu.tw:722/pochun/sim_real_bridge_image.git
@@ -73,9 +73,9 @@ git clone ssh://git@gitlab.screamtrumpet.csie.ncku.edu.tw:722/pochun/sim_real_br
 
 | 檔案 | 用途 |
 |---|---|
-| `omx_sim2real/assets/omx_f.usd` | Isaac 場景(8.2 MB,已 flatten) |
-| `omx_sim2real/assets/omx_f/omx_f.urdf` + `meshes/` | Lula IK 的輸入 |
-| `omx_sim2real/profile/omx_f.profile.yaml` | 關節名稱與順序 |
+| `omx_bridge_image/assets/omx_f.usd` | Isaac 場景(8.2 MB,已 flatten) |
+| `omx_bridge_image/assets/omx_f/omx_f.urdf` + `meshes/` | Lula IK 的輸入 |
+| `omx_bridge_image/profile/omx_f.profile.yaml` | 關節名稱與順序 |
 | `sim_real_bridge_image/bridge/sim_real_bridge/profile.py` | 純 Python + yaml,**無 ROS 相依** |
 
 **不要抄一份 `profile.py`**,加進 `PYTHONPATH`。全鏈只能有一份關節順序的真相:
@@ -83,7 +83,7 @@ git clone ssh://git@gitlab.screamtrumpet.csie.ncku.edu.tw:722/pochun/sim_real_br
 ```bash
 export PYTHONPATH="$PWD/sim_real_bridge_image/bridge:$PYTHONPATH"
 python -c "from sim_real_bridge.profile import load_profile; \
-  print(load_profile('omx_sim2real/profile/omx_f.profile.yaml').joints)"
+  print(load_profile('omx_bridge_image/profile/omx_f.profile.yaml').joints)"
 # 期待: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1']
 ```
 
@@ -510,7 +510,7 @@ PyTorch 2.7 —— 剛好就是 Blackwell 需要的。
 
 ### M7 — 接回 ROS seam(1 天)
 `policy_node` 訂閱相機與 `/joint_states`、發布 `/sync/command`。
-**完全複製 `omx_sim2real/src/omx_sim2real_app/omx_sim2real_app/jog.py` 的寫法**:
+**完全複製 `omx_bridge_image/src/omx_bridge_app/omx_bridge_app/jog.py` 的寫法**:
 行程內起 `SyncNode` 強制 `mode:=command`、背景執行緒 spin、只用公開介面。
 ✅ 同一個策略透過 bridge 驅動 Isaac,成功率相當。
 **這一步之後,指向真手臂只差一個 `targets:=real` 加一台真相機。**
