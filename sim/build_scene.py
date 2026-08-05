@@ -207,13 +207,19 @@ def add_cube_tf_nodes(stage, cfg, report):
     always reachable from outside Isaac, but nothing could say where the cube is
     or put it somewhere, and that is most of what running an episode means.
 
-    Two stock nodes close the gap, and they speak **standard** ``tf2_msgs``:
-    nothing needs Isaac's custom service package, which matters because this base
-    image has no interface-generation tooling to rebuild it for Jazzy.
+    Two stock nodes close the gap, and they are deliberately different kinds:
 
-    The two use **different topics on purpose**. Sharing ``/tf`` would feed the
-    publisher's output straight back into the subscriber, which pins the cube to
-    wherever it already is -- a reset that silently does nothing.
+    * **reading** goes over ``tf2_msgs`` -- a stream, standard messages, and the
+      pose is wanted every tick anyway.
+    * **writing** goes over ``ROS2ServicePrim``'s ``set_prim_attribute`` -- a
+      request, used a handful of times per episode.
+
+    ``ROS2SubscribeTransformTree`` looks like the obvious writer and is not: it
+    modifies **articulation roots**, and a loose rigid body is not one. Measured
+    2026-08-05 -- Isaac subscribes to the topic, receives the transform, and the
+    cube does not move, under four different frame-naming conventions. Writing
+    ``xformOp:translate`` *does* move it mid-simulation (also measured), which is
+    what the service does.
     """
     graph = f"{cfg.robot_root}/ActionGraph"
     if not stage.GetPrimAtPath(graph).IsValid():
@@ -235,22 +241,31 @@ def add_cube_tf_nodes(stage, cfg, report):
     pub.CreateAttribute("ui:nodegraph:node:pos", Sdf.ValueTypeNames.Float2).Set(
         Gf.Vec2f(631.0, 120.0))
 
-    sub = stage.DefinePrim(f"{graph}/ros2_subscribe_cube_tf", "OmniGraphNode")
-    sub.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
-        "isaacsim.ros2.bridge.ROS2SubscribeTransformTree")
-    sub.CreateAttribute("node:typeVersion", Sdf.ValueTypeNames.Int).Set(1)
-    sub.CreateAttribute("inputs:execIn", Sdf.ValueTypeNames.UInt).AddConnection(tick)
-    sub.CreateAttribute("inputs:topicName", Sdf.ValueTypeNames.String).Set(
-        cfg["ros"]["cube_set_topic"])
-    # [prim_path, frame_name, ...] -- publish a transform whose child_frame_id is
-    # this frame name and the prim moves there.
-    sub.CreateAttribute("inputs:frameNamesMap", Sdf.ValueTypeNames.TokenArray).Set(
-        [cube, cfg["ros"]["cube_frame"]])
-    sub.CreateAttribute("ui:nodegraph:node:pos", Sdf.ValueTypeNames.Float2).Set(
+    svc = stage.DefinePrim(f"{graph}/ros2_service_prim", "OmniGraphNode")
+    svc.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
+        "isaacsim.ros2.bridge.ROS2ServicePrim")
+    svc.CreateAttribute("node:typeVersion", Sdf.ValueTypeNames.Int).Set(1)
+    svc.CreateAttribute("inputs:execIn", Sdf.ValueTypeNames.UInt).AddConnection(tick)
+    # Every name is authored explicitly. A node written straight into USD does
+    # **not** pick up the .ogn defaults -- an unauthored string input reads as
+    # empty, and an empty service name advertises nothing at all. The first
+    # version of this authored only node:type and execIn, and Isaac ran it
+    # happily while offering no services.
+    for port, value in (
+            ("getAttributeServiceName", "get_prim_attribute"),
+            ("getAttributesServiceName", "get_prim_attributes"),
+            ("setAttributeServiceName", "set_prim_attribute"),
+            ("primsServiceName", "get_prims"),
+            ("nodeNamespace", ""),
+            ("qosProfile", "")):
+        svc.CreateAttribute(f"inputs:{port}", Sdf.ValueTypeNames.String).Set(value)
+    svc.CreateAttribute("inputs:context", Sdf.ValueTypeNames.UInt64).Set(0)
+    svc.CreateAttribute("ui:nodegraph:node:pos", Sdf.ValueTypeNames.Float2).Set(
         Gf.Vec2f(631.0, 260.0))
 
-    report.append(f"  ok  {graph}/ros2_publish_cube_tf   -> {cfg['ros']['cube_tf_topic']}")
-    report.append(f"  ok  {graph}/ros2_subscribe_cube_tf <- {cfg['ros']['cube_set_topic']}")
+    report.append(f"  ok  {graph}/ros2_publish_cube_tf -> {cfg['ros']['cube_tf_topic']}"
+                  f" ({cfg['ros']['cube_frame']})")
+    report.append(f"  ok  {graph}/ros2_service_prim    -> get/set_prim_attribute")
     return True
 
 

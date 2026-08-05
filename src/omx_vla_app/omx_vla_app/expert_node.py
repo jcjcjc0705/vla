@@ -5,9 +5,9 @@
 
 Isaac is opened by hand and **Play must be running**. Nothing here starts a
 simulator and nothing here touches Isaac's Python: the arm is driven through the
-same ``/sync/command`` seam ``jog`` uses, and the cube is read and moved over
-``tf2_msgs`` -- two stock nodes in the task scene's ActionGraph, no custom
-interfaces and no Isaac-side scripting.
+same ``/sync/command`` seam ``jog`` uses, and the cube is read over ``tf2_msgs`` and
+moved over Isaac's own prim service -- two stock nodes in the task scene's
+ActionGraph, no Isaac-side scripting.
 
 The state machine and the kinematics are imported from ``vla/sim/`` unchanged.
 ``expert.py`` and ``ik.py`` never imported ``isaacsim`` -- only numpy -- so the
@@ -39,6 +39,8 @@ from tf2_msgs.msg import TFMessage
 
 from omx_bridge_app import ros_args
 
+from .isaac_prim import IsaacPrim, IsaacPrimError
+
 VLA_ROOT = os.environ.get("VLA_ROOT", "/vla")
 if f"{VLA_ROOT}/sim" not in sys.path:
     sys.path.insert(0, f"{VLA_ROOT}/sim")
@@ -57,13 +59,15 @@ class ExpertClient(Node):
         self.cfg = cfg
         ros = cfg["ros"]
         self.cube_frame = ros["cube_frame"]
+        self.cube_prim = f"{cfg.task_root}/cube"
+        self.prim = IsaacPrim(self, cfg)
 
         self._q = None
         self._cube = None                      # (position, yaw)
         self._frames_seen = set()
+        self._warned_yaw = False
 
         self._cmd = self.create_publisher(JointState, "/sync/command", 10)
-        self._set_tf = self.create_publisher(TFMessage, ros["cube_set_topic"], 10)
 
         ep = profile.endpoint("sim")
         self._ep = ep
@@ -150,43 +154,42 @@ class ExpertClient(Node):
     def place_cube(self, position, yaw, settle=2.0, still_tol=1e-4):
         """Teleport the cube, then wait until it has stopped moving.
 
-        Returns False if it never arrived -- which is the honest outcome when
-        PhysX declines the write, and much easier to read than an episode that
-        looks like the policy missed.
+        Verified through TF rather than trusted: a write that quietly does
+        nothing leaves the cube where the last episode left it, which reads as a
+        policy failure rather than a plumbing failure.
 
-        Waiting for stillness instead of zeroing the velocity: TF carries no
-        velocity, and "has stopped" is the property actually wanted anyway.
+        Waiting for stillness instead of zeroing the velocity: momentum survives
+        a teleport, TF carries no velocity, and "has stopped" is the property
+        actually wanted anyway.
         """
-        from geometry_msgs.msg import TransformStamped
-
-        t = TransformStamped()
-        t.header.stamp = self.get_clock().now().to_msg()
-        t.header.frame_id = "world"
-        t.child_frame_id = self.cube_frame
-        t.transform.translation.x = float(position[0])
-        t.transform.translation.y = float(position[1])
-        t.transform.translation.z = float(position[2])
-        t.transform.rotation.w = math.cos(yaw / 2)
-        t.transform.rotation.z = math.sin(yaw / 2)
+        self.prim.set(self.cube_prim, "xformOp:translate",
+                      [float(v) for v in position])
+        try:
+            self.prim.set(self.cube_prim, "xformOp:orient",
+                          [math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)])
+        except IsaacPrimError as exc:
+            # Position is what the episode needs; yaw only varies how the cube is
+            # presented. Losing it silently would quietly narrow the dataset, so
+            # say so, once, and carry on.
+            if not self._warned_yaw:
+                print(f"      ! 方塊 yaw 設不了({exc}) —— 位置有效,朝向固定")
+                self._warned_yaw = True
 
         deadline = time.monotonic() + settle
         arrived = False
         last = None
         while time.monotonic() < deadline:
-            if not arrived:
-                self._set_tf.publish(TFMessage(transforms=[t]))
             time.sleep(0.1)
             here = self.cube()
             if here is None:
                 continue
-            if not arrived and np.linalg.norm(here[0][:2] - np.asarray(position)[:2]) < 5e-3:
-                arrived = True
-                last = None
+            if not arrived:
+                if np.linalg.norm(here[0][:2] - np.asarray(position)[:2]) < 5e-3:
+                    arrived, last = True, None
                 continue
-            if arrived:
-                if last is not None and np.linalg.norm(here[0] - last) < still_tol:
-                    return True
-                last = here[0]
+            if last is not None and np.linalg.norm(here[0] - last) < still_tol:
+                return True
+            last = here[0]
         return arrived
 
 
@@ -215,7 +218,7 @@ def run_episode(client, expert, kin, cfg, pos, yaw):
 
     client.go_home(grip["open"])
     if not client.place_cube(pos, yaw):
-        print("      ✗ 方塊沒有移到指定位置 —— Isaac 端的 tf_set 訂閱沒生效")
+        print("      ✗ 方塊沒有移到指定位置 —— set_prim_attribute 寫了但沒生效")
         return False, FAILED, 0
 
     at, at_yaw = client.cube()
@@ -278,7 +281,8 @@ def main(argv=None):
 
     rc = 1
     try:
-        if not (client.wait_for_joints() and client.wait_for_cube()):
+        if not (client.wait_for_joints() and client.wait_for_cube()
+                and client.prim.wait_for_isaac()):
             raise SystemExit(1)
 
         expert = PickCubeExpert(cfg, kin, seed=seed)

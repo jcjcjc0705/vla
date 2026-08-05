@@ -16,3 +16,4 @@ __pycache__/
 *.egg-info/
 .venv/
 ml-env/
+__pycache__/

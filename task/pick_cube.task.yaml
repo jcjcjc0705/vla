@@ -31,15 +31,20 @@ paths:
   scene_usd: "assets/pick_cube.usd"
 
 # ── ROS 介面 ────────────────────────────────────────────────────────────
-# 方塊的位姿雙向都走 tf2_msgs(標準訊息),不用 Isaac 的自訂 srv 套件 ——
-# 這個 base image 沒有介面產生工具,重建不了 Jazzy 版。
+# 讀方塊位姿走 TF(串流、標準訊息);寫方塊位姿走 Isaac 的 prim 服務
+# (請求式,一集只用幾次)。
 #
-# ⚠️ 兩個 topic **必須不同**。共用 /tf 的話,publisher 的輸出會直接餵回
-# subscriber,把方塊釘在原地 —— 一個靜默失效的 reset。
+# ⚠️ 寫入**不能**用 ROS2SubscribeTransformTree。它看起來剛好是反向的那個
+# 節點,但它改的是 **articulation root**,鬆散的剛體不算。2026-08-05 實測:
+# Isaac 確實訂閱了該 topic、也收到 transform,方塊完全不動 —— 四種 frame
+# 命名都一樣。而在模擬中直接寫 xformOp:translate 是有效的(也實測過),那
+# 正是 set_prim_attribute 做的事。
 ros:
   cube_tf_topic: "tf"          # Isaac -> 我們:方塊現在在哪
-  cube_set_topic: "tf_set"     # 我們 -> Isaac:把方塊放到這裡
-  cube_frame: "cube"           # child_frame_id
+  cube_frame: "cube"           # child_frame_id(= prim 名)
+  # 服務名是 ROS2ServicePrim 的預設值
+  get_attribute_service: "/get_prim_attribute"
+  set_attribute_service: "/set_prim_attribute"
 
 scene:
   task_root: "/World/task"        # 我們新增的東西都掛在這底下,不碰 /omx_f
