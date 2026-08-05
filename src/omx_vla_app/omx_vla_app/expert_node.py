@@ -67,6 +67,7 @@ class ExpertClient(Node):
         self._cube = None                      # (position, yaw)
         self._frames_seen = set()
         self._warned_yaw = False
+        self.place_retries = 0
 
         self._cmd = self.create_publisher(JointState, "/sync/command", 10)
 
@@ -200,19 +201,14 @@ class ExpertClient(Node):
             time.sleep(0.05)
         return False
 
-    def place_cube(self, position, yaw, settle=2.0, still_tol=1e-4):
-        """Teleport the cube, then wait until it has stopped moving.
-
-        Verified through TF rather than trusted: a write that quietly does
-        nothing leaves the cube where the last episode left it, which reads as a
-        policy failure rather than a plumbing failure.
-
-        Waiting for stillness instead of zeroing the velocity: momentum survives
-        a teleport, TF carries no velocity, and "has stopped" is the property
-        actually wanted anyway.
-        """
-        self.prim.set(self.cube_prim, "xformOp:translate",
-                      [float(v) for v in position])
+    def _write_pose(self, position, yaw):
+        """Write the cube's pose. Returns False if Isaac refused the write."""
+        try:
+            self.prim.set(self.cube_prim, "xformOp:translate",
+                          [float(v) for v in position])
+        except IsaacPrimError as exc:
+            print(f"      ! 寫入方塊位置失敗:{exc}")
+            return False
         try:
             self.prim.set(self.cube_prim, "xformOp:orient",
                           [math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)])
@@ -223,7 +219,19 @@ class ExpertClient(Node):
             if not self._warned_yaw:
                 print(f"      ! 方塊 yaw 設不了({exc}) —— 位置有效,朝向固定")
                 self._warned_yaw = True
+        return True
 
+    def _wait_placed(self, position, settle, still_tol):
+        """Did the cube arrive and stop moving?
+
+        Checked through TF rather than trusted: a write that quietly does
+        nothing leaves the cube where the last episode left it, which reads as a
+        policy failure rather than a plumbing failure.
+
+        Waiting for stillness instead of zeroing the velocity: momentum survives
+        a teleport, TF carries no velocity, and "has stopped" is what is actually
+        wanted anyway.
+        """
         deadline = time.monotonic() + settle
         arrived = False
         last = None
@@ -240,6 +248,28 @@ class ExpertClient(Node):
                 return True
             last = here[0]
         return arrived
+
+    def place_cube(self, position, yaw, settle=2.0, still_tol=1e-4, attempts=3):
+        """Teleport the cube where the episode wants it, retrying if it does not go.
+
+        The write occasionally does not take -- a race between the service
+        applying the USD edit and PhysX owning the body, most likely. It is rare
+        and it is transient, and both of those are reasons to retry rather than
+        to fail: an unattended 200-episode recording cannot afford to drop
+        episodes to something a second attempt fixes.
+
+        Retrying means **re-issuing the write**, not just waiting longer; the
+        failure is the write not landing, so more patience alone does nothing.
+        """
+        for attempt in range(1, attempts + 1):
+            if self._write_pose(position, yaw) and self._wait_placed(
+                    position, settle, still_tol):
+                self.place_retries += attempt - 1
+                if attempt > 1:
+                    print(f"      · 方塊第 {attempt} 次嘗試才放到位")
+                return True
+        self.place_retries += attempts - 1
+        return False
 
 
 def run_episode(client, expert, kin, cfg, pos, yaw, snap=None):
@@ -399,6 +429,10 @@ def main(argv=None):
                   f"  (n={len(L)})")
             print("  狀態機是用**命令**位置判定到達的,手臂還在追。夾合的 0.5 秒"
                   "通常夠它追上 —— 落後夠大時就先在方塊上緣合起來。")
+
+        if client.place_retries:
+            print(f"\n方塊放置重試 {client.place_retries} 次 / {episodes} 集"
+                  f"   (寫入偶爾不生效,重試就過;不重試的話這些都是報廢的集數)")
 
         rate = wins / max(episodes, 1)
         print(f"\n成功 {wins}/{episodes} = {rate * 100:.0f}%"
