@@ -180,10 +180,15 @@ class PickCubeExpert:
 
 
 # ── running it ─────────────────────────────────────────────────────────
-def run_episode(scene, expert, seed, holdout=False, render_every=None):
-    """One episode. Returns (success, phase, ticks)."""
+def run_episode(scene, expert, seed, holdout=False, render=False):
+    """One episode. Returns (success, phase, ticks).
+
+    ``render`` draws the last physics step of every control tick, which is what
+    makes the run visible in a GUI or livestream. It costs real time, so batch
+    runs leave it off.
+    """
     cfg = expert.cfg
-    render_every = render_every or cfg["timing"]["render_every"]
+    render_every = cfg["timing"]["render_every"]
     pos, quat = scene.sample_cube_pose(seed, holdout)
     scene.reset(seed=seed, cube_pose=(pos, quat))
 
@@ -197,8 +202,8 @@ def run_episode(scene, expert, seed, holdout=False, render_every=None):
         if finished:
             break
         scene.set_targets(targets)
-        for _ in range(render_every):
-            scene.step()
+        for i in range(render_every):
+            scene.step(render=render and i == render_every - 1)
         if expert.phase in (LIFT, HOLD) and scene.success():
             ok = True
     return ok, expert.phase, expert.ticks
@@ -210,11 +215,16 @@ def main():
     ap.add_argument("--holdout", action="store_true",
                     help="改用訓練保留區的方塊位置")
     ap.add_argument("--seed0", type=int, default=0)
+    ap.add_argument("--gui", action="store_true",
+                    help="開 Isaac 視窗看它跑(先關掉你自己開的那個 Isaac)")
+    ap.add_argument("--livestream", action="store_true",
+                    help="用 WebRTC 串流出來看,伺服器上用這個")
     args = ap.parse_args()
 
     sys.path.insert(0, str(SIM_DIR))
     import app
-    simulation_app = app.start(headless=True)
+    watch = args.gui or args.livestream
+    simulation_app = app.start(headless=not args.gui, livestream=args.livestream)
     sys.path.insert(0, str(SIM_DIR))
     from scene import PickCubeScene
 
@@ -226,7 +236,7 @@ def main():
     wins, fails = 0, {}
     for i in range(args.episodes):
         seed = args.seed0 + i
-        ok, phase, ticks = run_episode(scene, expert, seed, args.holdout)
+        ok, phase, ticks = run_episode(scene, expert, seed, args.holdout, render=watch)
         wins += ok
         if not ok:
             fails[PHASE_NAMES[phase]] = fails.get(PHASE_NAMES[phase], 0) + 1
