@@ -119,6 +119,15 @@ class PickCubeScene:
         self.place_cube(pos, quat)
         for _ in range(self.cfg["timing"]["settle_steps"]):
             self.world.step(render=False)
+
+        # Flush the renderer's temporal history before anyone looks through a
+        # camera. RTX accumulates across frames, so right after a reset the
+        # image still shows the *previous* episode -- and a few frames later it
+        # shows the new cube plus a ghost of the old one. Physics-only steps do
+        # not advance it; only rendered frames do. See timing.reset_render_frames.
+        for _ in range(self.cfg["timing"]["reset_render_frames"] if self.cameras else 0):
+            self.world.step(render=True)
+
         self._hold = 0
         return self.observe(render=False)
 
