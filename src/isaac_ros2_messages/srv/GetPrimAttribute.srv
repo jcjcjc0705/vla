@@ -1,0 +1,7 @@
+string path
+string attribute
+---
+string value
+string type
+bool success
+string message

@@ -28,8 +28,12 @@ services:
     volumes:
       # The whole repo: sim/ for the shared logic, task/ for the spec.
       - ../..:/vla
-      # The task's ROS package, built in place with `r`.
+      # ROS packages, built in place with `r`. isaac_ros2_messages lives
+      # here rather than in the image because Isaac ships it compiled for
+      # Humble only, and this is Jazzy -- so it is rebuilt from the same
+      # interface. The base image already has the generation tooling.
       - ../../src/omx_vla_app:/workspaces/src/omx_vla_app
+      - ../../src/isaac_ros2_messages:/workspaces/src/isaac_ros2_messages
     command: sleep infinity
     stdin_open: true
     tty: true
