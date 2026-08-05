@@ -48,12 +48,23 @@ class PickCubeExpert:
         self.gi = cfg.joints.index(cfg["gripper"]["joint"])
         self.dt = 1.0 / cfg["timing"]["fps"]
 
+    def _reject(self, why, cube_pos):
+        """Record why an episode could not be planned, then decline it.
+
+        A bare False makes every planning failure look the same in the log, and
+        they are not: "out of reach" and "the cube is not where it was put" want
+        opposite fixes.
+        """
+        self.reject_reason = f"{why} (方塊在 {np.round(cube_pos, 4)})"
+        return False
+
     # ── planning ───────────────────────────────────────────────────────
     def reset(self, q_now, cube_pos, cube_yaw):
         """Plan an episode. Returns False when the cube is simply unreachable."""
         grip = self.cfg["gripper"]
         grasp_z = self.cfg["cube"]["size"] / 2
         jit = lambda s: self.rng.normal(0.0, s)  # noqa: E731
+        self.reject_reason = None
 
         # Aim slightly off, on purpose, and differently every episode.
         gx = cube_pos[0] + jit(self.n["waypoint_xy"])
@@ -64,25 +75,25 @@ class PickCubeExpert:
         # solution flip elbow mid-trajectory, which is a discontinuity in the
         # recorded action -- and unlearnable.
         if self.kin.solve(self.grasp_at, cube_yaw) is None:
-            return False
+            return self._reject("抓取點無解", cube_pos)
         self.elbow = max(
             ("up", "down"),
             key=lambda e: (lambda q: -1e9 if q is None else self.kin.fk(q)[1][1:, 2].min())(
                 self.kin.ik(self.grasp_at, cube_yaw, elbow=e)),
         )
         if self.kin.ik(self.grasp_at, cube_yaw, elbow=self.elbow) is None:
-            return False
+            return self._reject("選定的肘姿抓取點無解", cube_pos)
 
         prefer = max(self.e["hover_floor"],
                      self.e["hover_prefer"] + jit(self.n["hover_height"]))
         found = self.kin.hover(self.grasp_at, cube_yaw,
                                prefer=prefer, floor=self.e["hover_floor"])
         if found is None:
-            return False
+            return self._reject("懸停點無解", cube_pos)
         self.hover_at, _ = found
         self.q_hover = self.kin.ik(self.hover_at, cube_yaw, elbow=self.elbow)
         if self.q_hover is None:
-            return False
+            return self._reject("懸停姿態無解", cube_pos)
         # The lift target needs the same reachability treatment as the hover.
         # Without it the far edge of the annulus plans a lift it cannot perform
         # and IK fails **mid-trajectory** -- a wasted episode, and if it were not
@@ -92,7 +103,7 @@ class PickCubeExpert:
                                prefer=need + self.e["lift_extra"],
                                floor=need + self.e["lift_margin"])
         if found is None:
-            return False
+            return self._reject("抬升點無解", cube_pos)
         self.lift_at, _ = found
 
         self.yaw = cube_yaw
@@ -110,6 +121,8 @@ class PickCubeExpert:
         self.ticks = 0
         self.close_for = max(1, self.e["close_ticks"]
                              + int(round(jit(self.n["close_ticks"]))))
+        self.settle = 0
+        self.settle_timeouts = 0
         return True
 
     # ── stepping ───────────────────────────────────────────────────────
@@ -125,7 +138,35 @@ class PickCubeExpert:
         self.q_start = self.q_start + delta / span * stride
         return self.q_start
 
-    def _step_tool(self):
+    def _settled(self, goal, measured):
+        """Has the **arm** reached ``goal``, not just the command?
+
+        The command is an interpolation this class owns; the arm is a set of PD
+        drives chasing it, and at the moment the command lands the arm is still
+        13-16 mm behind (measured 2026-08-05, cube edge 25 mm). Closing the
+        fingers then means closing them above the cube and hoping the 0.5 s of
+        closing is enough for the arm to catch up. It usually is, which is worse
+        than never -- it fails only in the poses where gravity loads the drives
+        hardest, and a demonstration set built that way teaches a policy a timing
+        coincidence rather than a grasp.
+
+        Callers that cannot measure pass ``None`` and get the old behaviour.
+        A timeout still releases the phase, because an arm that never converges
+        must not hang the episode -- ``settle_timeouts`` records how often.
+        """
+        if measured is None:
+            return True
+        if np.linalg.norm(goal - np.asarray(measured)) <= self.e["settle_tol"]:
+            self.settle = 0
+            return True
+        self.settle += 1
+        if self.settle >= self.e["settle_max_ticks"]:
+            self.settle = 0
+            self.settle_timeouts += 1
+            return True
+        return False
+
+    def _step_tool(self, measured=None):
         """Tool-space leg: straight lines at a controlled speed."""
         goal = {DESCEND: self.grasp_at, CLOSE: self.grasp_at,
                 LIFT: self.lift_at, HOLD: self.lift_at}[self.phase]
@@ -136,14 +177,14 @@ class PickCubeExpert:
         self.tool = goal.copy() if dist <= stride else self.tool + delta / dist * stride
         arrived = dist <= self.e["arrive_tol"]
 
-        if self.phase == DESCEND and arrived:
+        if self.phase == DESCEND and arrived and self._settled(goal, measured):
             self.phase, self.timer = CLOSE, 0
         elif self.phase == CLOSE:
             self.gripper = self.cfg["gripper"]["grasp"]
             self.timer += 1
             if self.timer >= self.close_for:
                 self.phase = LIFT
-        elif self.phase == LIFT and arrived:
+        elif self.phase == LIFT and arrived and self._settled(goal, measured):
             self.phase, self.timer = HOLD, 0
         elif self.phase == HOLD:
             # Longer than hold_steps on purpose. success() needs that many
@@ -155,8 +196,13 @@ class PickCubeExpert:
                 self.phase = DONE
         return self.kin.ik(self.tool, self.yaw, elbow=self.elbow)
 
-    def act(self):
+    def act(self, measured=None):
         """The next joint-target vector, and whether the episode is over.
+
+        ``measured`` is the tool position the arm is **actually** at, in world
+        coordinates -- pass ``kin.fk(q[:5])[0]`` of the measured joints. Given
+        it, the phases that must not start early wait for the arm rather than
+        for the command. See ``_settled``.
 
         Returns ``(targets, finished)``. ``targets`` is exactly the payload that
         would go on ``/sync/command``: the six canonical joints, radians, USD
@@ -168,7 +214,8 @@ class PickCubeExpert:
         if self.phase in (DONE, FAILED):
             return None, True
 
-        q = self._step_joints() if self.phase == APPROACH else self._step_tool()
+        q = (self._step_joints() if self.phase == APPROACH
+             else self._step_tool(measured))
         if q is None:
             self.phase = FAILED
             return None, True
@@ -180,7 +227,7 @@ class PickCubeExpert:
 
 
 # ── running it ─────────────────────────────────────────────────────────
-def run_episode(scene, expert, seed, holdout=False, render=False):
+def run_episode(scene, expert, kin, seed, holdout=False, render=False):
     """One episode. Returns (success, phase, ticks).
 
     ``render`` draws the last physics step of every control tick, which is what
@@ -198,7 +245,7 @@ def run_episode(scene, expert, seed, holdout=False, render=False):
 
     ok = False
     while True:
-        targets, finished = expert.act()
+        targets, finished = expert.act(kin.fk(scene.joint_positions()[:5])[0])
         if finished:
             break
         scene.set_targets(targets)
@@ -236,7 +283,7 @@ def main():
     wins, fails = 0, {}
     for i in range(args.episodes):
         seed = args.seed0 + i
-        ok, phase, ticks = run_episode(scene, expert, seed, args.holdout, render=watch)
+        ok, phase, ticks = run_episode(scene, expert, kin, seed, args.holdout, render=watch)
         wins += ok
         if not ok:
             fails[PHASE_NAMES[phase]] = fails.get(PHASE_NAMES[phase], 0) + 1

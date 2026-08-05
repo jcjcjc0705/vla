@@ -269,6 +269,72 @@ def add_cube_tf_nodes(stage, cfg, report):
     return True
 
 
+def add_camera_nodes(stage, cfg, report):
+    """Publish both cameras on ROS.
+
+    Needed twice over: M4 records from these, and until they exist the only way
+    to see why a grasp failed is to describe it in numbers. A render product has
+    to be created for each camera first -- ``ROS2CameraHelper`` publishes *a
+    render product*, not a camera prim.
+
+    Resolution comes from the same ``cameras.<name>.resolution`` the offline
+    renders use, so what arrives over ROS and what ``preview_cameras.py`` writes
+    are the same image.
+    """
+    graph = f"{cfg.robot_root}/ActionGraph"
+    tick = Sdf.Path(f"{graph}/on_playback_tick.outputs:tick")
+    cams = cfg["cameras"]
+    ros = cfg["ros"]
+    y = 400.0
+
+    for name, prim_path in (("front", f"{cfg.task_root}/cam_front"),
+                            ("wrist", f"{cams['wrist']['parent']}/cam_wrist")):
+        if not stage.GetPrimAtPath(prim_path).IsValid():
+            report.append(f"FAIL  找不到相機 {prim_path}")
+            return False
+        w, h = cams[name]["resolution"]
+
+        rp = stage.DefinePrim(f"{graph}/render_product_{name}", "OmniGraphNode")
+        rp.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
+            "isaacsim.core.nodes.IsaacCreateRenderProduct")
+        rp.CreateAttribute("node:typeVersion", Sdf.ValueTypeNames.Int).Set(1)
+        rp.CreateAttribute("inputs:execIn", Sdf.ValueTypeNames.UInt).AddConnection(tick)
+        rp.CreateAttribute("inputs:width", Sdf.ValueTypeNames.UInt).Set(int(w))
+        rp.CreateAttribute("inputs:height", Sdf.ValueTypeNames.UInt).Set(int(h))
+        rp.CreateAttribute("inputs:enabled", Sdf.ValueTypeNames.Bool).Set(True)
+        rp.CreateRelationship("inputs:cameraPrim").SetTargets([Sdf.Path(prim_path)])
+        rp.CreateAttribute("ui:nodegraph:node:pos", Sdf.ValueTypeNames.Float2).Set(
+            Gf.Vec2f(300.0, y))
+
+        pub = stage.DefinePrim(f"{graph}/ros2_camera_{name}", "OmniGraphNode")
+        pub.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
+            "isaacsim.ros2.bridge.ROS2CameraHelper")
+        pub.CreateAttribute("node:typeVersion", Sdf.ValueTypeNames.Int).Set(2)
+        # Chained off the render product's execOut, not off the tick: the
+        # product must exist before anything tries to publish it.
+        pub.CreateAttribute("inputs:execIn", Sdf.ValueTypeNames.UInt).AddConnection(
+            Sdf.Path(f"{graph}/render_product_{name}.outputs:execOut"))
+        pub.CreateAttribute("inputs:renderProductPath", Sdf.ValueTypeNames.Token
+                            ).AddConnection(
+            Sdf.Path(f"{graph}/render_product_{name}.outputs:renderProductPath"))
+        pub.CreateAttribute("inputs:topicName", Sdf.ValueTypeNames.String).Set(
+            ros["camera_topics"][name])
+        pub.CreateAttribute("inputs:type", Sdf.ValueTypeNames.Token).Set("rgb")
+        pub.CreateAttribute("inputs:frameId", Sdf.ValueTypeNames.String).Set(f"cam_{name}")
+        pub.CreateAttribute("inputs:nodeNamespace", Sdf.ValueTypeNames.String).Set("")
+        pub.CreateAttribute("inputs:qosProfile", Sdf.ValueTypeNames.String).Set("")
+        pub.CreateAttribute("inputs:frameSkipCount", Sdf.ValueTypeNames.UInt).Set(
+            int(ros.get("camera_frame_skip", 0)))
+        pub.CreateAttribute("inputs:enabled", Sdf.ValueTypeNames.Bool).Set(True)
+        pub.CreateAttribute("ui:nodegraph:node:pos", Sdf.ValueTypeNames.Float2).Set(
+            Gf.Vec2f(631.0, y))
+
+        report.append(f"  ok  {graph}/ros2_camera_{name} -> {ros['camera_topics'][name]}"
+                      f"  {w}x{h}")
+        y += 140.0
+    return True
+
+
 def build(cfg: task_config.Config, force: bool) -> int:
     out = cfg.scene_usd
     if out.exists() and not force:
@@ -330,6 +396,7 @@ def build(cfg: task_config.Config, force: bool) -> int:
 
     hidden_ok = all(hide_prim(stage, p, report) for p in ov["hide"]["prims"])
     service_ok = add_cube_tf_nodes(stage, cfg, report)
+    camera_ok = add_camera_nodes(stage, cfg, report)
 
     stage.GetRootLayer().Save()
 
@@ -365,7 +432,7 @@ def build(cfg: task_config.Config, force: bool) -> int:
         if not check.GetPrimAtPath(must).IsValid():
             print(f"FAIL  少了 {must}")
             ok = False
-    if not (hidden_ok and service_ok):
+    if not (hidden_ok and service_ok and camera_ok):
         ok = False
     for p in ov["hide"]["prims"]:
         # Check the path that was **asked** for, on a fresh open -- not the path

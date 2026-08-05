@@ -45,6 +45,12 @@ ros:
   # 服務名是 ROS2ServicePrim 的預設值
   get_attribute_service: "/get_prim_attribute"
   set_attribute_service: "/set_prim_attribute"
+  # 相機影像。ROS2CameraHelper 發的是「render product」不是相機 prim,所以
+  # 每台相機都要先有一個 IsaacCreateRenderProduct。
+  camera_topics:
+    front: "/cam_front/rgb"
+    wrist: "/cam_wrist/rgb"
+  camera_frame_skip: 0           # >0 可以在算繪吃緊時降低發佈頻率
 
 scene:
   task_root: "/World/task"        # 我們新增的東西都掛在這底下,不碰 /omx_f
@@ -205,7 +211,14 @@ expert:
   lift_extra: 0.03                # 抬到 success.lift_height 之上再多留一點
   lift_margin: 0.005              # 抬升至少要高過 lift_height 這麼多,否則規劃階段就放棄
   hold_margin: 10                 # HOLD 比 success.hold_steps 多撐幾個週期
-  arrive_tol: 0.002               # m,判定到達路徑點
+  arrive_tol: 0.002               # m,判定**命令**到達路徑點
+  # 下降到位、抬升到位之後,還要等**手臂實際**進到這個範圍才往下一階段。
+  # ⚠️ 2026-08-05 實測:只看命令的話,開始夾合的瞬間手臂平均落後 13.8mm、
+  # 最大 16.0mm —— 方塊才 25mm。夾合的 0.5 秒通常夠追上,所以大多會成功,
+  # 但那是時序上的巧合:重力力矩大的姿態就先在方塊上緣合起來。示範資料裡
+  # 學到巧合,換到動態不同的真手臂就崩。
+  settle_tol: 0.003               # m
+  settle_max_ticks: 60            # 2 秒還沒到就放行,不能讓單集卡住
   max_ticks: 400                  # 單集上限,逾時算失敗
 
   # ⚠️ 雜訊不是可有可無的。腳本專家的軌跡近乎單模態,隨機化不夠時學生會學成
