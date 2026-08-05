@@ -148,7 +148,23 @@ stiffness 625 → ~5000(damping 隨之 ~100)。
 跟重量無關。解法依序試:`convexHull` → `convexDecomposition`;仍是圓角就在
 `link6`/`link7` 底下各加一片薄的 `FixedCuboid` 當夾持墊(~5 行,常見且正當的做法)。
 
-### 3.5 `gripper_joint_2` 是**真的** PhysX mimic joint
+### 3.5 `gripper_joint_2` 的 mimic 剛度 —— **M1 唯一真正的障礙,已解決**
+
+`/omx_f/joints/gripper_joint_2` 的 `apiSchemas` 是**空的** —— 它**沒有任何 drive**,
+純粹靠 `PhysxMimicJoint:rotZ` 約束跟隨 `gripper_joint_1`。
+
+原廠 `naturalFrequency = 25.0` 在 1/120 s 的步長下**太軟**:夾到東西時被動指會被
+物體頂開、嚴重落後,結果**只有一根手指在出力**,另一根等於不存在。
+
+**已實測解法:`naturalFrequency` 25 → 1000**(寫在 `task/pick_cube.task.yaml` 的
+`overrides.mimic_joint`)。改完在 GUI 裡用 `jog` 手動驗證,方塊確實被夾起並抬離桌面。
+調硬也更貼近真實 —— 真手臂第二指是齒輪連動的剛性連結,不是彈簧。
+
+⚠️ **這個問題對「調 `gripper_joint_1` 的 drive stiffness」完全免疫。** 實測把它從
+625 拉到 20000(32 倍)、方塊從 15 g 減到 5 g,掉落距離一毫米都沒變 —— 因為出力的
+那根手指本來就夠力。**如果日後又出現夾不住,先看被動指跟不跟得上,不要再去調 drive。**
+
+### 3.5b `gripper_joint_2` 是**真的** PhysX mimic joint
 
 `/omx_f/joints/gripper_joint_2` 帶 `PhysxMimicJointAPI:rotZ`,
 `referenceJoint → gripper_joint_1`,`gearing = 1.0`,`naturalFrequency = 25.0`,
