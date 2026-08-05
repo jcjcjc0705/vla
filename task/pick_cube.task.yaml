@@ -1,0 +1,129 @@
+# pick_cube 任務規格 —— 這是唯一該手改的檔案。
+#
+# build_scene.py 讀它產生 assets/pick_cube.usd,其餘每一支程式也都從這裡取值。
+# 改任何數值 = 重跑 build_scene.py。**不要把數值寫進程式碼。**
+#
+# ⚠️ 改了 cube 或 gripper 底下的東西之後,先前錄的資料就作廢(物理變了)。
+#    所以 M1 的工作就是把這一份定下來,再去錄 200 集。
+
+paths:
+  # 相對於這個 repo 的根目錄。找不到時 config.py 會依序試 candidates。
+  omx_sim2real:
+    - "../omx_sim2real"                                   # 筆電 / 伺服器 clone 並排時
+    - "~/omx_vla/omx_sim2real"
+  sim_real_bridge:                                        # 只為了 profile.py(關節順序的真相)
+    - "../../docker/bridge/sim_real_bridge_image/bridge"   # 筆電
+    - "../sim_real_bridge_image/bridge"                    # 伺服器
+    - "~/omx_vla/sim_real_bridge_image/bridge"
+  # 相對於 omx_sim2real
+  robot_usd: "assets/omx_f.usd"
+  robot_urdf: "assets/omx_f/omx_f.urdf"
+  profile: "profile/omx_f.profile.yaml"
+  # 相對於這個 repo
+  scene_usd: "assets/pick_cube.usd"
+
+scene:
+  task_root: "/World/task"        # 我們新增的東西都掛在這底下,不碰 /omx_f
+  robot_root: "/omx_f"            # sublayer 帶進來的,唯讀
+
+# ── 要抓的方塊 ───────────────────────────────────────────────────────────
+# 15 g @ 25 mm。夾爪指尖法向力約 0.14 N(可夾 25–30 g),所以這在預算內、
+# 還有約 2 倍餘裕。夾不住時第一個該調的就是 mass。
+cube:
+  size: 0.025                     # m,邊長
+  mass: 0.015                     # kg
+  color: [0.85, 0.15, 0.15]
+  # ⚠️ Isaac 預設 static_friction=0.2 太滑,一定要自己指定
+  static_friction: 1.0
+  dynamic_friction: 0.9
+  restitution: 0.0
+
+# ── 每回合方塊生成的位置 ─────────────────────────────────────────────────
+# 環帶取樣。手臂最大伸展約 0.40 m(肩在 (-0.011, 0, 0.0975)),
+# 這個範圍留了充足餘裕給「先移到方塊正上方」的姿態。
+spawn:
+  radius: [0.16, 0.26]            # m
+  theta_deg: [-50.0, 50.0]        # 繞 +Z,0 = +X 方向
+  yaw_deg: [-45.0, 45.0]          # 方塊自身朝向
+  # 訓練絕不使用的保留區,用來驗證「策略真的在看影像」而不是背軌跡。
+  # M5 的成敗就看這一區的成功率。
+  holdout_theta_deg: [-50.0, -30.0]
+
+# ── 相機 ────────────────────────────────────────────────────────────────
+# front 是主相機,內參對齊 D455,日後 sim2real 只要換影像來源。
+# wrist 掛在手臂上,錄起來備用 —— M5 會跑「只用 front」vs「兩台都用」的對照,
+# 決定 sim2real 值不值得買一台腕上相機。
+cameras:
+  front:
+    resolution: [640, 480]
+    horizontal_fov_deg: 90.0      # D455 彩色鏡頭約 90°×65°
+    # TODO(M1): 用實測的 camera_info 換算精確內參
+    #   ros2 topic echo /camera/camera/color/camera_info --once
+    #   再餵給 camera/cameracalibration/isaac_camera.py
+    eye: [-0.25, -0.30, 0.45]     # 斜後上方,像人的脖子/胸口高度往下看
+    target: [0.21, 0.0, 0.03]     # 工作區中心
+    clipping: [0.02, 10.0]
+  wrist:
+    resolution: [640, 480]
+    horizontal_fov_deg: 70.0
+    parent: "/omx_f/link5"          # 腕部,跟著手臂動
+    # link5 的區域座標在 home 時與世界軸對齊,所以位移可以直接讀。
+    # 夾爪接近軸實測是 +X(link5 → 兩指中點 = 0.998, -0.056, 0)。
+    # 相機掛在手指**後上方**朝前看,不要放在兩指之間。
+    translate: [-0.03, 0.0, 0.05]
+    # USD 相機看 -Z。繞 Y 轉 θ 會把 -Z 映到 (-sinθ, 0, -cosθ):
+    #   θ=-90° → +X(正前方);θ=-75° → +X 再下俯 15°,對準抓取點
+    rotate_xyz_deg: [0.0, -75.0, 0.0]
+    clipping: [0.01, 5.0]
+  # 資料集裡的影像尺寸(算繪解析度會降到這個大小再存)
+  record_resolution: [320, 240]
+
+# ── 只在這個場景生效的物理覆寫 ───────────────────────────────────────────
+# 這些是 pick_cube.usd 裡的 override,**不會動到 omx_f.usd**。
+# omx_f.usd 是 sim↔real 校正鏈的一部分,必須保持位元不變。
+overrides:
+  gripper_drive:
+    # 原始值 stiffness=625 / damping=40 對應指尖約 0.14 N。夾不住就往上調。
+    joints: ["gripper_joint_1"]
+    stiffness: 625.0
+    damping: 40.0
+  arm_drive:
+    joints: ["joint1", "joint2", "joint3", "joint4", "joint5"]
+    stiffness: 625.0
+    damping: 40.0
+  finger_colliders:
+    # 手指是塊狀零件(扁平比 3.7),convexHull 不會保留出平整夾持面。
+    # 順序:convexHull → convexDecomposition → 加 pad(見 pads)
+    prims:
+      - "/colliders/link6/follower_07_gripper_motorized/node_STL_BINARY_"
+      - "/colliders/link7/follower_08_gripper_gear/node_STL_BINARY_"
+    approximation: "convexHull"
+  pads:
+    # 最後手段:在兩根手指內側各加一片薄板當夾持面。
+    enabled: false
+    size: [0.020, 0.002, 0.012]   # m
+
+# ── 夾爪開合 ────────────────────────────────────────────────────────────
+# ⚠️ home(q=0)時夾爪是**閉合**的,正值 = 開。
+gripper:
+  joint: "gripper_joint_1"
+  open: 0.60                      # rad
+  closed: 0.0
+  grasp: -0.05                    # 略超過接觸,靠 drive 產生夾持力
+
+# ── 成功判定 ────────────────────────────────────────────────────────────
+# 兩個條件都要,而且要連續成立 hold_steps 步:
+#   lifted 擋不住「方塊被彈飛」,held 才擋得住;
+#   單一影格擋不住彈跳,連續才擋得住。
+success:
+  lift_height: 0.05               # m,高於方塊半徑
+  max_ee_distance: 0.06           # m,方塊必須還在夾爪附近
+  hold_steps: 15                  # 0.5 s @ 30 fps
+
+# ── 時間 ────────────────────────────────────────────────────────────────
+timing:
+  physics_dt: 0.008333333          # 1/120
+  render_every: 4                  # 每 4 個物理步算繪並記錄一次 → 30 fps
+  fps: 30
+  settle_steps: 20                 # reset 之後讓方塊落定
+  max_episode_steps: 450           # 15 s @ 30 fps,逾時視為失敗
