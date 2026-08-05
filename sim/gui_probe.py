@@ -48,7 +48,10 @@ def _mm(v):
 
 
 def where():
-    """Print where everything is, in millimetres."""
+    """Print where everything is, in millimetres.
+
+    ASCII only: the Script Editor console mangles non-Latin text.
+    """
     _bbox.Clear()
     q = np.asarray(_arm.get_joint_positions())[_idx]
     print(f"\ngripper_joint_1 = {q[_GI]:+.4f} rad")
@@ -57,9 +60,25 @@ def where():
         lo, hi = _mm(r.GetMin()), _mm(r.GetMax())
         print(f"  {link}  x[{lo[0]:7.1f},{hi[0]:7.1f}]  "
               f"y[{lo[1]:7.1f},{hi[1]:7.1f}]  z[{lo[2]:7.1f},{hi[2]:7.1f}]")
-    print(f"  EE    {_mm(_ee.get_world_pose()[0])}")
-    print(f"  cube  {_mm(_cube.get_world_pose()[0])}")
-    print("  (bbox 涵蓋整根手指,含靠近樞軸的安裝座 —— 夾持面請用滑鼠點指尖看 Property)")
+    ee_p, ee_q = _ee.get_world_pose()
+    cube_p = _cube.get_world_pose()[0]
+    print(f"  EE    {_mm(ee_p)}   quat(wxyz) {np.round(ee_q, 4)}")
+    print(f"  cube  {_mm(cube_p)}")
+
+    # The offset that matters is in the EE's own frame: the world-space
+    # difference depends on how the arm happens to be posed right now, but the
+    # grasp point is fixed relative to the gripper.
+    w, x, y, z = [float(v) for v in ee_q]
+    R = np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
+        [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
+    ])
+    local = R.T @ (np.asarray(cube_p) - np.asarray(ee_p))
+    print(f"  cube - EE : world {_mm(np.asarray(cube_p) - np.asarray(ee_p))} mm"
+          f"   EE-local {_mm(local)} mm   <-- this is the number to record")
+    print("  (link bboxes span the whole finger incl. the mount near the pivot,")
+    print("   so they do not locate the gripping face; the EE-local offset does)")
 
 
 def grip(value):
@@ -67,7 +86,7 @@ def grip(value):
     q = np.asarray(_arm.get_joint_positions())[_idx].astype(np.float32)
     q[_GI] = value
     _arm.apply_action(ArticulationAction(joint_positions=q, joint_indices=np.array(_idx)))
-    print(f"gripper -> {value:+.3f} rad  (要按 Play 才會動)")
+    print(f"gripper -> {value:+.3f} rad  (needs Play running to move)")
 
 
 def cube(x, y=-0.0016, z=0.2106):
@@ -87,7 +106,7 @@ def squeeze(closed=0.0, hold=None):
     """
     before = np.asarray(_cube.get_world_pose()[0]).copy()
     grip(closed)
-    print(f"合攏中... 等一兩秒再跑 where(),或 result({before[2]:.4f})")
+    print(f"closing... wait a second, then where() or result({before[2]:.4f})")
     return before
 
 
@@ -95,10 +114,10 @@ def result(z_before):
     """Compare the cube's height now against before the squeeze."""
     z = float(_cube.get_world_pose()[0][2])
     drop = (z_before - z) * 1000
-    print(f"掉落 {drop:+.1f} mm  ->  {'✓ 夾住了' if drop < 15 else '✗ 掉了'}")
+    print(f"drop {drop:+.1f} mm  ->  {'HELD' if drop < 15 else 'DROPPED'}")
     return drop
 
 
 print(__doc__.split("    1.")[0])
-print("可用: where()  grip(rad)  cube(x[,y,z])  squeeze()  result(z_before)")
+print("available: where()  grip(rad)  cube(x[,y,z])  squeeze()  result(z_before)")
 where()
