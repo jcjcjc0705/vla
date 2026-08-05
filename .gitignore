@@ -1,0 +1,18 @@
+# 錄下來的資料集 — 200 集 × 2 相機約 5 GB,只留在伺服器
+data/
+
+# 訓練產物
+outputs/
+checkpoints/
+*.ckpt
+*.safetensors
+
+# build_scene.py 產生的場景 —— 是產物不是原始碼,兩台各自生成
+assets/*.usd
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+ml-env/
