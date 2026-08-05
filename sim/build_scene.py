@@ -127,6 +127,72 @@ def override_attr(stage, prim_path, attr_name, value, report):
     return True
 
 
+def editable_source(stage, prim_path):
+    """The prim you can actually author on for ``prim_path``.
+
+    Most of this robot's geometry is reached through instance proxies, which
+    cannot be overridden. The proxy's contents come from a reference to a
+    ``/Flattened_Prototype_N`` prim; that one is a normal prim in this stage's
+    layer stack, so an override there composes through.
+
+    Do not guess the prototype path by name. ``/visuals/link5/mesh_1`` looks like
+    the source of ``/omx_f/link5/visuals/mesh_1`` and is not -- it is a separate,
+    unused copy, so authoring there is a silent no-op. Ask the prim index.
+
+    Returns ``(path, None)`` for a prim that is already editable, or
+    ``(resolved_path, reason)`` where ``reason`` is set when resolution failed.
+    """
+    from pxr import Pcp
+
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return None, f"prim 不存在: {prim_path}"
+    if not prim.IsInstanceProxy():
+        return prim_path, None
+
+    suffix = []
+    node = prim
+    while node.IsInstanceProxy():
+        suffix.append(node.GetName())
+        node = node.GetParent()
+
+    refs = [a for a in node.GetPrimIndex().rootNode.children
+            if a.arcType == Pcp.ArcTypeReference]
+    if not refs:
+        return None, f"{node.GetPath()} 是 instance 但找不到 reference 弧"
+    arc = refs[0]
+    if arc.layerStack.identifier.rootLayer != stage.GetRootLayer():
+        return None, (f"{prim_path} 的 reference 來自別的 layer stack "
+                      f"({arc.layerStack.identifier.rootLayer.identifier}),"
+                      "在這裡覆寫不會生效")
+
+    resolved = arc.path
+    for name in reversed(suffix):
+        resolved = resolved.AppendChild(name)
+    return str(resolved), None
+
+
+def hide_prim(stage, prim_path, report):
+    """Make a prim invisible in this scene only.
+
+    Authored as an ``over`` in the root layer, so the robot asset keeps the prim
+    and every other tool that opens it still sees it. Give it the path you see in
+    the Stage tree; instance proxies are resolved for you.
+    """
+    resolved, why = editable_source(stage, prim_path)
+    if why:
+        report.append(f"FAIL  隱藏 {prim_path}: {why}")
+        return False
+    prim = stage.GetPrimAtPath(resolved)
+    if not prim.IsA(UsdGeom.Imageable):
+        report.append(f"FAIL  {resolved} 不是 Imageable,沒有 visibility")
+        return False
+    UsdGeom.Imageable(prim).MakeInvisible()
+    via = "" if resolved == prim_path else f" (經由 {resolved})"
+    report.append(f"  ok  {prim_path} -> invisible{via}")
+    return True
+
+
 def build(cfg: task_config.Config, force: bool) -> int:
     out = cfg.scene_usd
     if out.exists() and not force:
@@ -185,6 +251,8 @@ def build(cfg: task_config.Config, force: bool) -> int:
     for p in fc["prims"]:
         override_attr(stage, p, "physics:approximation", fc["approximation"], report)
 
+    hidden_ok = all(hide_prim(stage, p, report) for p in ov["hide"]["prims"])
+
     stage.GetRootLayer().Save()
 
     # ── verify ─────────────────────────────────────────────────────────
@@ -218,6 +286,19 @@ def build(cfg: task_config.Config, force: bool) -> int:
                  f"{wrist['parent']}/cam_wrist"):
         if not check.GetPrimAtPath(must).IsValid():
             print(f"FAIL  少了 {must}")
+            ok = False
+    if not hidden_ok:
+        ok = False
+    for p in ov["hide"]["prims"]:
+        # Check the path that was **asked** for, on a fresh open -- not the path
+        # that was written to. Checking the latter passes even when the override
+        # landed on an unrelated prim, which is exactly how the first version of
+        # this hid the wrong copy of the marker and still reported success.
+        target = check.GetPrimAtPath(p)
+        vis = (UsdGeom.Imageable(target).ComputeVisibility()
+               if target and target.IsValid() else "prim 不存在")
+        if vis != UsdGeom.Tokens.invisible:
+            print(f"FAIL  {p} 重開後仍然可見 ({vis})")
             ok = False
     print("\nRESULT:", "場景可用" if ok else "場景有問題,不要拿去用")
     return 0 if ok else 1

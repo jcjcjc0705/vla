@@ -60,7 +60,15 @@ cameras:
     # TODO(M1): 用實測的 camera_info 換算精確內參
     #   ros2 topic echo /camera/camera/color/camera_info --once
     #   再餵給 camera/cameracalibration/isaac_camera.py
-    eye: [-0.25, -0.30, 0.45]     # 斜後上方,像人的脖子/胸口高度往下看
+    # 斜後上方往下看,方向不變,距離從 0.69 m 拉近到 0.50 m。
+    # 0.69 m 時方塊只有 11.6 px(錄製降到 320x240 之後剩 6 px),畫面 2/3 是空
+    # 地板。0.50 m 讓方塊變成 16 px,同時整個工作範圍——生成環帶 ±50°、夾爪在
+    # 環帶上方 0.20 m 盤旋、底座——都還留 55 px 邊距。再近就會切到夾爪:
+    # 0.45 m 剩 19 px,0.42 m 出界。
+    #
+    # 只動距離不動 FOV:90° 是要對齊 D455 的,那是日後 sim2real 換影像來源的
+    # 前提。構圖用距離調,內參留給硬體。
+    eye: [-0.1227, -0.2170, 0.3337]
     target: [0.21, 0.0, 0.03]     # 工作區中心
     clipping: [0.02, 10.0]
   wrist:
@@ -114,6 +122,21 @@ overrides:
     # 最後手段:在兩根手指內側各加一片薄板當夾持面。
     enabled: false
     size: [0.020, 0.002, 0.012]   # m
+
+  hide:
+    # URDF 的 end_effector_link 帶了一個 10mm 紅色 <box> 除錯標記
+    # (omx_f.urdf 第 243-250 行)。它落在腕上相機正中央、擋住夾持點,
+    # 而且跟目標方塊同一個紅色 —— 訓練影像裡最不該出現的東西。
+    #
+    # 蓋在這一層而不是改 URDF/USD:jog、to_sim、to_real 仍然看得到標記,
+    # 只有任務場景看不到。
+    #
+    # 寫 Stage 樹上看到的路徑就好。它是 instance proxy,build_scene 會自己
+    # 問 prim index 找出真正能覆寫的 /Flattened_Prototype_N/...。
+    # 不要自己猜來源路徑:/visuals/link5/mesh_1 看起來像但不是,寫過去會
+    # 靜默地什麼都沒發生。
+    prims:
+      - "/omx_f/link5/visuals/mesh_1"
 
 # ── 夾爪開合 ────────────────────────────────────────────────────────────
 # ⚠️ home(q=0)時夾爪是**閉合**的,正值 = 開。
