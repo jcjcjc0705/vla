@@ -39,6 +39,7 @@ import omni.usd
 from isaacsim.core.prims import SingleArticulation, SingleRigidPrim, SingleXFormPrim
 from isaacsim.core.utils.types import ArticulationAction
 
+import spawn
 import task_config
 from expert import DONE, FAILED, HOLD, LIFT, PHASE_NAMES, PickCubeExpert
 from ik import OMXKinematics
@@ -104,22 +105,10 @@ def run(seed=None, holdout=False):
     if seed is None:
         seed = np.random.randint(0, 10000)
 
-    s = _cfg["spawn"]
-    rng = np.random.default_rng(seed)
-    band = s["holdout_theta_deg"] if holdout else s["theta_deg"]
-    while True:
-        th = rng.uniform(*band)
-        lo, hi = s["holdout_theta_deg"]
-        if holdout or not (lo <= th <= hi):
-            break
-    r = rng.uniform(*s["radius"])
-    yaw = math.radians(rng.uniform(*s["yaw_deg"]))
-    pos = np.array([r * math.cos(math.radians(th)), r * math.sin(math.radians(th)),
-                    _cfg["cube"]["size"] / 2])
+    pos, yaw, r, th = spawn.sample_cube_pose(
+        _cfg, np.random.default_rng(seed), holdout)
 
-    _cube.set_world_pose(position=pos,
-                         orientation=np.array([math.cos(yaw / 2), 0.0, 0.0,
-                                               math.sin(yaw / 2)]))
+    _cube.set_world_pose(position=pos, orientation=spawn.yaw_quat(yaw))
     _cube.set_linear_velocity(np.zeros(3))
     _cube.set_angular_velocity(np.zeros(3))
 

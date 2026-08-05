@@ -48,6 +48,7 @@ if f"{VLA_ROOT}/sim" not in sys.path:
 import task_config                                        # noqa: E402
 from expert import FAILED, HOLD, LIFT, PHASE_NAMES, PickCubeExpert  # noqa: E402
 from ik import OMXKinematics                              # noqa: E402
+from spawn import sample_cube_pose                        # noqa: E402
 
 
 class ExpertClient(Node):
@@ -151,6 +152,24 @@ class ExpertClient(Node):
             time.sleep(0.05)
         return False
 
+    def wait_for_release(self, timeout=2.0):
+        """Wait until the cube is back on the floor before moving it.
+
+        The previous episode ends **holding** the cube. go_home opens the
+        gripper, but it returns as soon as the joints are in tolerance -- the
+        cube is still falling, and may still be between the fingers. Teleporting
+        it then puts it inside the finger geometry, PhysX pushes it straight back
+        out, and the reset looks like a failed write.
+        """
+        floor = self.cfg["cube"]["size"] / 2
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            here = self.cube()
+            if here is not None and here[0][2] < floor + 0.01:
+                return True
+            time.sleep(0.05)
+        return False
+
     def place_cube(self, position, yaw, settle=2.0, still_tol=1e-4):
         """Teleport the cube, then wait until it has stopped moving.
 
@@ -193,22 +212,6 @@ class ExpertClient(Node):
         return arrived
 
 
-def sample_cube_pose(cfg, rng, holdout=False):
-    """Same distribution as sim/scene.py, without needing the simulator."""
-    s = cfg["spawn"]
-    band = s["holdout_theta_deg"] if holdout else s["theta_deg"]
-    lo, hi = s["holdout_theta_deg"]
-    while True:
-        th = rng.uniform(*band)
-        if holdout or not (lo <= th <= hi):
-            break
-    r = rng.uniform(*s["radius"])
-    yaw = math.radians(rng.uniform(*s["yaw_deg"]))
-    a = math.radians(th)
-    return (np.array([r * math.cos(a), r * math.sin(a), cfg["cube"]["size"] / 2]),
-            yaw, r, th)
-
-
 def run_episode(client, expert, kin, cfg, pos, yaw):
     """Reset, run the state machine, return (success, phase, ticks)."""
     grip = cfg["gripper"]
@@ -217,15 +220,19 @@ def run_episode(client, expert, kin, cfg, pos, yaw):
     period = 1.0 / cfg["timing"]["fps"]
 
     client.go_home(grip["open"])
+    client.wait_for_release()
     if not client.place_cube(pos, yaw):
-        print("      ✗ 方塊沒有移到指定位置 —— set_prim_attribute 寫了但沒生效")
-        return False, FAILED, 0
+        here = client.cube()
+        print(f"      ✗ 方塊沒有到位:目標 {np.round(pos, 3)},"
+              f" 實際 {np.round(here[0], 3) if here else '讀不到'}")
+        return False, FAILED, 0, None
 
     at, at_yaw = client.cube()
     if not expert.reset(client.joints(), at, at_yaw):
-        return False, FAILED, 0
+        return False, FAILED, 0, None
 
     ok = False
+    held = []
     while True:
         targets, finished = expert.act()
         if finished:
@@ -234,13 +241,20 @@ def run_episode(client, expert, kin, cfg, pos, yaw):
         time.sleep(period)
         if expert.phase in (LIFT, HOLD):
             cube = client.cube()[0]
+            q = client.joints()
             # Distance to the **pinch point**, from the measured joints -- it is
             # the point the cube is actually held at, and it costs no round trip.
-            tool = kin.fk(client.joints()[:5])[0]
+            tool = kin.fk(q[:5])[0]
             if (cube[2] > grasp_z + succ["lift_height"]
                     and np.linalg.norm(cube - tool) < succ["max_ee_distance"]):
                 ok = True
-    return ok, expert.phase, expert.ticks
+                # Where the cube actually ended up, in the gripper's own frame.
+                # gripper.grasp_offset says where the fingers pinch; if the two
+                # disagree the arm is aiming a few mm off the cube's centre every
+                # single time, which is a bias baked into every demonstration.
+                held.append(kin.in_ee(q[:5], cube))
+    residual = np.mean(held, axis=0) if held else None
+    return ok, expert.phase, expert.ticks, residual
 
 
 def main(argv=None):
@@ -287,16 +301,32 @@ def main(argv=None):
 
         expert = PickCubeExpert(cfg, kin, seed=seed)
         rng = np.random.default_rng(seed)
-        wins, fails = 0, {}
+        wins, fails, residuals = 0, {}, []
         for i in range(episodes):
             pos, yaw, r, th = sample_cube_pose(cfg, rng, holdout)
-            ok, phase, ticks = run_episode(client, expert, kin, cfg, pos, yaw)
+            ok, phase, ticks, residual = run_episode(client, expert, kin, cfg, pos, yaw)
             wins += ok
+            if residual is not None:
+                residuals.append(residual)
             if not ok:
                 fails[PHASE_NAMES[phase]] = fails.get(PHASE_NAMES[phase], 0) + 1
             print(f"  第 {i + 1:3d} 集  r={r * 1000:.0f}mm θ={th:+.0f}° "
                   f"{'✅' if ok else '✗ '} 停在「{PHASE_NAMES[phase]}」 {ticks} 個週期",
                   flush=True)
+
+        if residuals:
+            got = np.mean(residuals, axis=0)
+            want = np.array(cfg["gripper"]["grasp_offset"])
+            n = len(residuals)
+            se = np.std(residuals, axis=0) / max(n ** 0.5, 1)
+            print(f"\n夾持殘差:方塊被夾住時,實際位置在 end_effector_link 座標系")
+            print(f"  實測平均 {np.round(got, 5)}   設定的 grasp_offset {np.round(want, 5)}")
+            print(f"  差異     {np.round((got - want) * 1000, 2)} mm"
+                  f"   ±{np.round(se * 1000, 2)} 標準誤 (n={n})")
+            print("  ⚠️ 專家有注入 ±5mm 路徑點雜訊,單集殘差本來就會散;"
+                  "看的是平均與標準誤,不是單集。")
+            if np.abs(got - want).max() > 0.002:
+                print(f"  → 把 gripper.grasp_offset 改成 [{got[0]:.4f}, {got[1]:.4f}, {got[2]:.4f}]")
 
         rate = wins / max(episodes, 1)
         print(f"\n成功 {wins}/{episodes} = {rate * 100:.0f}%"
