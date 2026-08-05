@@ -13,9 +13,12 @@ paths:
   # host 上。用 image 的人可以這樣取出來:
   #   docker run --rm -v "$PWD:/out" <image> cp -r /assets /out
   omx_bridge:
-    - "../../docker/robot/omx_bridge_image"                # 筆電
+    - "../../docker/robot/omx_bridge_image"                # 筆電 checkout
     - "../omx_bridge_image"                                # 伺服器並排 clone 時
     - "~/omx_vla/omx_bridge_image"
+    - "/"                                                  # 容器內:image 把 assets/
+                                                           # 跟 profile/ 烤在根目錄,
+                                                           # 相對佈局跟 repo 一樣
   sim_real_bridge:                                        # 只為了 profile.py(關節順序的真相)
     - "../../docker/bridge/sim_real_bridge_image/bridge"   # 筆電
     - "../sim_real_bridge_image/bridge"                    # 伺服器
@@ -26,6 +29,17 @@ paths:
   profile: "profile/omx_f.profile.yaml"
   # 相對於這個 repo
   scene_usd: "assets/pick_cube.usd"
+
+# ── ROS 介面 ────────────────────────────────────────────────────────────
+# 方塊的位姿雙向都走 tf2_msgs(標準訊息),不用 Isaac 的自訂 srv 套件 ——
+# 這個 base image 沒有介面產生工具,重建不了 Jazzy 版。
+#
+# ⚠️ 兩個 topic **必須不同**。共用 /tf 的話,publisher 的輸出會直接餵回
+# subscriber,把方塊釘在原地 —— 一個靜默失效的 reset。
+ros:
+  cube_tf_topic: "tf"          # Isaac -> 我們:方塊現在在哪
+  cube_set_topic: "tf_set"     # 我們 -> Isaac:把方塊放到這裡
+  cube_frame: "cube"           # child_frame_id
 
 scene:
   task_root: "/World/task"        # 我們新增的東西都掛在這底下,不碰 /omx_f

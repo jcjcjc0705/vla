@@ -1,0 +1,35 @@
+# An idle container to run the VLA tools in. Nothing starts on its own.
+#
+# Isaac is NOT started by this. Open it yourself, load vla/assets/pick_cube.usd,
+# press Play, then in here:
+#
+#   ros2 run omx_vla_app expert                                  # 5 episodes
+#   ros2 run omx_vla_app expert --ros-args -p episodes:=20
+#   ros2 run omx_bridge_app jog sim                              # drive it by hand
+#
+# The image already provides the engine, the profile and jog. This adds only the
+# task: the VLA repo is mounted so `r` rebuilds it in place.
+name: omx_vla
+
+services:
+  vla:
+    image: registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image:latest
+    container_name: omx_vla
+    network_mode: host
+    ipc: host
+    environment:
+      # Must match the value Isaac was launched with, or nothing discovers
+      # anything and it looks exactly like a broken scene.
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
+      - FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+      # Where the nodes find sim/ik.py and sim/expert.py -- the same modules the
+      # native Isaac runs use. There is one expert, not two.
+      - VLA_ROOT=/vla
+    volumes:
+      # The whole repo: sim/ for the shared logic, task/ for the spec.
+      - ../..:/vla
+      # The task's ROS package, built in place with `r`.
+      - ../../src/omx_vla_app:/workspaces/src/omx_vla_app
+    command: sleep infinity
+    stdin_open: true
+    tty: true

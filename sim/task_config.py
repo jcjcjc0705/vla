@@ -57,9 +57,16 @@ class Config:
         self.omx_bridge = _resolve(
             paths["omx_bridge"], paths["robot_usd"], "omx_bridge_image"
         )
-        self.bridge_root = _resolve(
-            paths["sim_real_bridge"], "sim_real_bridge/profile.py", "sim_real_bridge"
-        )
+        # Inside omx_bridge_image, sim_real_bridge is an **installed** ROS package
+        # on PYTHONPATH, not a directory to be found. Only fall back to searching
+        # when the import is not already available (which is the native-Isaac case).
+        self.bridge_root = None
+        try:
+            import sim_real_bridge.profile  # noqa: F401
+        except ImportError:
+            self.bridge_root = _resolve(
+                paths["sim_real_bridge"], "sim_real_bridge/profile.py", "sim_real_bridge"
+            )
 
         self.robot_usd = self.omx_bridge / paths["robot_usd"]
         self.robot_urdf = self.omx_bridge / paths["robot_urdf"]
@@ -70,14 +77,16 @@ class Config:
 
     def _load_joints(self):
         """canonical 關節順序,來自 sim_real_bridge —— 全鏈唯一的真相。"""
-        if str(self.bridge_root) not in sys.path:
+        if self.bridge_root is not None and str(self.bridge_root) not in sys.path:
             sys.path.insert(0, str(self.bridge_root))
         try:
             from sim_real_bridge.profile import load_profile
         except ImportError as exc:                      # noqa: BLE001
+            where = self.bridge_root or "已安裝的 ROS 套件"
             raise ConfigError(
-                f"從 {self.bridge_root} import sim_real_bridge.profile 失敗:{exc}\n"
-                "它是純 Python + yaml,不該有相依問題 —— 檢查 clone 是否完整。"
+                f"從 {where} import sim_real_bridge.profile 失敗:{exc}\n"
+                "它是純 Python + yaml,不該有相依問題 —— 容器內請先 source "
+                "install/setup.bash,原生環境請檢查 clone 是否完整。"
             ) from exc
         return list(load_profile(str(self.profile_path)).joints)
 
@@ -99,7 +108,7 @@ class Config:
             f"task     : {self.task_file}",
             f"robot usd: {self.robot_usd}",
             f"scene usd: {self.scene_usd}  ({'已存在' if self.scene_usd.exists() else '尚未產生'})",
-            f"bridge   : {self.bridge_root}",
+            f"bridge   : {self.bridge_root or '已安裝的 sim_real_bridge 套件'}",
             f"joints({len(self.joints)}): {', '.join(self.joints)}",
             f"cube     : {c['size'] * 1000:.0f} mm, {c['mass'] * 1000:.0f} g, "
             f"摩擦 {c['static_friction']}",
