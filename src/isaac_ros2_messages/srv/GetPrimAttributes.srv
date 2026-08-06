@@ -1,7 +1,0 @@
-string path
----
-string[] names
-string[] displays
-string[] types
-bool success
-string message

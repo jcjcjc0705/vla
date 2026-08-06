@@ -13,7 +13,10 @@ name: omx_vla
 
 services:
   vla:
-    image: omx_bridge_image:moveit
+    # 釘住版本而不是追 :latest。這裡對 image 的相依是硬的 —— 引擎、profile、
+    # jog、MoveIt 解算器、Isaac prim 服務介面全部在 image 裡,原始碼比 image
+    # 新的時候只會得到一行 ModuleNotFoundError。
+    image: registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image:0.2.0
     container_name: omx_vla
     network_mode: host
     ipc: host
@@ -28,12 +31,9 @@ services:
     volumes:
       # The whole repo: sim/ for the shared logic, task/ for the spec.
       - ../..:/vla
-      # ROS packages, built in place with `r`. isaac_ros2_messages lives
-      # here rather than in the image because Isaac ships it compiled for
-      # Humble only, and this is Jazzy -- so it is rebuilt from the same
-      # interface. The base image already has the generation tooling.
+      # The task package, built in place with `r`. The Isaac service
+      # interfaces and their client come from the image.
       - ../../src/omx_vla_app:/workspaces/src/omx_vla_app
-      - ../../src/isaac_ros2_messages:/workspaces/src/isaac_ros2_messages
     command: sleep infinity
     stdin_open: true
     tty: true

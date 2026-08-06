@@ -40,8 +40,8 @@ from sim_real_bridge.sync_node import SyncNode
 from tf2_msgs.msg import TFMessage
 
 from omx_bridge_app import ros_args
+from omx_bridge_app.isaac_prim import IsaacPrim, IsaacPrimError
 
-from .isaac_prim import IsaacPrim, IsaacPrimError
 from .recorder import Recorder
 
 VLA_ROOT = os.environ.get("VLA_ROOT", "/vla")
@@ -64,7 +64,8 @@ class ExpertClient(Node):
         ros = cfg["ros"]
         self.cube_frame = ros["cube_frame"]
         self.cube_prim = f"{cfg.task_root}/cube"
-        self.prim = IsaacPrim(self, cfg)
+        self.prim = IsaacPrim(self, ros["get_attribute_service"],
+                              ros["set_attribute_service"])
 
         self._q = None
         self._cube = None                      # (position, yaw)

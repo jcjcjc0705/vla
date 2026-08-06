@@ -234,6 +234,13 @@ def add_cube_tf_nodes(stage, cfg, report):
     pub.CreateAttribute("ui:nodegraph:node:pos", Sdf.ValueTypeNames.Float2).Set(
         Gf.Vec2f(631.0, 120.0))
 
+    # The sublayer may already carry one (omx_f.usd gained it with the drag-to-
+    # move debug target). Two of these advertise the same four service names, so
+    # adding a second is not merely redundant -- it is a conflict.
+    if stage.GetPrimAtPath(f"{graph}/ros2_service_prim").IsValid():
+        report.append(f"  --  {graph}/ros2_service_prim 已由 sublayer 提供,不重複加")
+        return True
+
     svc = stage.DefinePrim(f"{graph}/ros2_service_prim", "OmniGraphNode")
     svc.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
         "isaacsim.ros2.bridge.ROS2ServicePrim")
