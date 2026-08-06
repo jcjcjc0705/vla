@@ -71,6 +71,7 @@ class ExpertClient(Node):
         self._frames_seen = set()
         self._warned_yaw = False
         self.place_retries = 0
+        self._mimic = None
 
         self._cmd = self.create_publisher(JointState, "/sync/command", 10)
 
@@ -96,6 +97,14 @@ class ExpertClient(Node):
                 got[joint] = self._ep.endpoint_to_canonical(joint, pos)
         if all(j in got for j in self.profile.joints):
             self._q = np.array([got[j] for j in self.profile.joints], dtype=float)
+        # gripper_joint_2 is the **passive** finger: no drive, carried by a
+        # PhysxMimicJoint at multiplier -1. It is not in the canonical six, so
+        # read it straight off the wire. If it does not mirror joint_1 the
+        # passive finger is sitting wherever the constraint put it rather than
+        # against the cube.
+        for name, pos in zip(msg.name, msg.position):
+            if name == "gripper_joint_2":
+                self._mimic = float(pos)
 
     def _on_tf(self, msg):
         for t in msg.transforms:
@@ -163,6 +172,13 @@ class ExpertClient(Node):
     # ── outgoing ───────────────────────────────────────────────────────
     def joints(self):
         return None if self._q is None else self._q.copy()
+
+    def mimic_error(self):
+        """How far the passive finger is from mirroring the driven one, in rad."""
+        if self._mimic is None or self._q is None:
+            return float("nan")
+        gi = self.profile.joints.index(self.cfg["gripper"]["joint"])
+        return float(self._mimic + self._q[gi])      # multiplier -1 -> sum is 0
 
     def cube(self):
         return None if self._cube is None else (self._cube[0].copy(), self._cube[1])
@@ -287,22 +303,29 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
         here = client.cube()
         print(f"      ✗ 方塊沒有到位:目標 {np.round(pos, 3)},"
               f" 實際 {np.round(here[0], 3) if here else '讀不到'}")
-        return False, FAILED, 0, None, float('nan'), (float('nan'),) * 2
+        return False, FAILED, 0, None, float('nan'), (float('nan'),) * 3
 
     at, at_yaw = client.cube()
     if not expert.reset(client.joints(), at, at_yaw):
         print(f"      ✗ 規劃不了:{expert.reject_reason}"
               f"   (要求放在 {np.round(pos, 4)})")
-        return False, FAILED, 0, None, float('nan'), (float('nan'),) * 2
+        return False, FAILED, 0, None, float('nan'), (float('nan'),) * 3
 
     ok = False
     held = []
+    mimic = []
     shot = set()
     lag = float("nan")
     grasp_pitch = grasp_tilt = float("nan")
     while True:
         phase_before = expert.phase
-        measured = kin.fk(client.joints()[:5])[0]
+        q_now = client.joints()
+        # Resync a stateful solver to the real arm. The analytic one has no
+        # state and ignores this; MoveIt's position-only IK is decided almost
+        # entirely by its seed, and left to feed off its own output it drifts.
+        if hasattr(kin, "seed"):
+            kin.seed = q_now[:5]
+        measured = kin.fk(q_now[:5])[0]
         targets, finished = expert.act(measured)
         if phase_before != expert.phase and expert.phase == CLOSE:
             # How far behind the command the arm is when the fingers start to
@@ -333,7 +356,10 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
         if expert.phase in (LIFT, HOLD):
             cube = client.cube()[0]
             q = client.joints()
-            # Distance to the **pinch point**, from the measured joints.
+            # Height plus distance to the pinch point. Deliberately not
+            # "do the fingers look like they touch": the decomposed colliders
+            # are fatter than the rendered mesh and are not drawn, so a firm
+            # grasp shows a visible gap on both sides.
             tool = kin.fk(q[:5])[0]
             if (cube[2] > grasp_z + succ["lift_height"]
                     and np.linalg.norm(cube - tool) < succ["max_ee_distance"]):
@@ -341,8 +367,11 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
                 # Where the cube ended up, in the gripper's own frame -- see the
                 # printout at the end of a run for what this can and cannot say.
                 held.append(kin.in_ee(q[:5], cube))
+                mimic.append(client.mimic_error())
     residual = np.mean(held, axis=0) if held else None
-    return ok, expert.phase, expert.ticks, residual, lag, (grasp_pitch, grasp_tilt)
+    mimic_err = float(np.nanmean(mimic)) if mimic else float('nan')
+    return ok, expert.phase, expert.ticks, residual, lag,\
+        (grasp_pitch, grasp_tilt, mimic_err)
 
 
 def main(argv=None, record=False):
@@ -459,6 +488,10 @@ def main(argv=None, record=False):
             print(f"夾合瞬間夾爪俯仰角: 平均 {G[:,0].mean():.1f}°  範圍 "
                   f"{G[:,0].min():.1f}~{G[:,0].max():.1f}°   "
                   f"開合軸偏離水平 最大 {G[:,1].max():.1f}°")
+            m = G[:, 2][~np.isnan(G[:, 2])]
+            if len(m):
+                print(f"被動指(gripper_joint_2)未跟上驅動指: 平均 {np.degrees(m).mean():+.2f}°"
+                      f"  最大 {np.degrees(np.abs(m)).max():.2f}°")
         if lags:
             L = np.array(lags) * 1000
             print(f"夾合瞬間手臂落後命令(mm):平均 {L.mean():.1f}  最大 {L.max():.1f}")

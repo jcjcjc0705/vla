@@ -74,6 +74,18 @@ class MoveItKinematics:
         self._state.set_to_default_values()
         self._n = len(cfg.joints) - 1          # the 5 arm joints
 
+        # ⚠️ Position-only IK has a 2-DOF null space and no criterion for picking
+        # within it, so the answer is decided almost entirely by the seed. Left
+        # to chain off its own previous answer the solver drifts, and the drift
+        # is chaotic: changing the collider approximation -- which cannot touch
+        # kinematics -- moved the mean grasp pitch from 44 to 7 degrees, because
+        # it changed how many ticks each phase took and therefore how many times
+        # the seed had been fed back into itself.
+        #
+        # Callers set `seed` from the **measured** joints each tick. That is both
+        # what a controller actually does and what makes a run reproducible.
+        self.seed = None
+
     # ── forward: delegated ─────────────────────────────────────────────
     def fk(self, q):
         return self.analytic.fk(q)
@@ -96,6 +108,9 @@ class MoveItKinematics:
         position-only IK none of them can be requested. They stay in the
         signature so the two solvers remain interchangeable.
 
+        Seeded from ``self.seed`` when the caller keeps it fed with measured
+        joint positions; otherwise from the previous answer, which drifts.
+
         MoveIt solves for a *link*, so the pinch offset is removed first -- the
         request is for wherever ``end_effector_link`` has to be for the fingers
         to close on ``target``. Which orientation the solver returns is not known
@@ -103,7 +118,8 @@ class MoveItKinematics:
         orientation and then corrected once.
         """
         target = np.asarray(target, dtype=float)
-        q = np.asarray(self._state.get_joint_group_positions(self.group),
+        q = np.asarray(self.seed if self.seed is not None
+                       else self._state.get_joint_group_positions(self.group),
                        dtype=float)[:self._n]
         # EE -> pinch, **not** link5 -> pinch. Subtracting tool_local instead
         # leaves the 91.9 mm end_effector_joint offset in, which shows up as the
