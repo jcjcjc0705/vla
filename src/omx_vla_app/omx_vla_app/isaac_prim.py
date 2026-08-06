@@ -1,18 +1,14 @@
 """Write USD prim attributes over Isaac Sim's ROS 2 services.
 
-Reading the cube goes over TF -- it is a stream and it is wanted every tick.
-This is the other direction: putting the cube somewhere for the next episode, a
-handful of requests per episode.
+Reading the cube goes over TF -- a stream, wanted every tick. This is the other
+direction: putting the cube somewhere for the next episode, a few requests per
+episode.
 
 ``ROS2SubscribeTransformTree`` looks like it should do this and does not: it
-modifies articulation roots, and a loose rigid body is not one. Measured
-2026-08-05 -- the subscription exists, the transform arrives, the cube stays put,
-under four different frame-naming conventions. Writing ``xformOp:translate``
-while physics runs *does* move it, which is what ``set_prim_attribute`` does.
+modifies articulation roots, and a loose rigid body is not one.
 
-**The services only answer while the timeline is playing**, which is correct
-(there is nothing to write otherwise) and is what "timed out" almost always
-means.
+**The services only answer while the timeline is playing**, which is what a
+timeout almost always means.
 """
 from __future__ import annotations
 
@@ -30,8 +26,8 @@ class IsaacPrim:
     """Client for Isaac's prim attribute services, bound to an existing node.
 
     Calls block the caller. That is safe only because the node is spun by an
-    executor on **another** thread -- the arrangement ``jog`` uses. Called from
-    inside the executor's own thread this would deadlock.
+    executor on **another** thread; called from inside the executor's own thread
+    this would deadlock.
     """
 
     def __init__(self, node, cfg, call_timeout: float = 5.0):

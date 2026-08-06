@@ -457,10 +457,10 @@ collider 之後,先前錄的資料就作廢**。重錄 200 集才貴,先把旋�
 心態是「花半小時定下參數」,不是「怕做不到」。卡超過一兩小時就直接用最粗暴的解
 (方塊再變輕、加 box pad),不要在這裡精雕細琢。
 
-> **M1 已完成 2026-08-05。** 定案參數在 `task/pick_cube.task.yaml`:mimic
-> `natural_frequency: 1000`、`grasp_offset: [-0.006, -0.0002, -0.011]`(EE 座標系)。
-> 隨時可用 `bash sim/isaac_python.sh sim/grasp_test.py` 一鍵回歸驗證 ——
-> 改任何物理參數後都該跑一次,不用再開 GUI。
+> **M1 已完成。** 定案參數在 `task/pick_cube.task.yaml`:mimic
+> `natural_frequency: 1000`、`grasp_offset: [-0.006, -0.0002, 0.0]`(EE 座標系)。
+> 回歸驗證改成跑專家本身:`ros2 run omx_vla_app expert --ros-args -p episodes:=20`
+> —— 它每一集都完整做一次抓取與抬升,改任何物理參數後跑一次即可。
 
 ### M2 — 腳本專家(1–2 天)
 Lula IK + 抓放狀態機。**先跑 1000 個取樣姿態的 IK,回報失敗率**,再錄任何東西。
