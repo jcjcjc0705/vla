@@ -356,10 +356,10 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
         if expert.phase in (LIFT, HOLD):
             cube = client.cube()[0]
             q = client.joints()
-            # Height plus distance to the pinch point. Deliberately not
-            # "do the fingers look like they touch": the decomposed colliders
-            # are fatter than the rendered mesh and are not drawn, so a firm
-            # grasp shows a visible gap on both sides.
+            # Height plus distance to the pinch point -- not "do the fingers
+            # look like they touch". Any convex approximation of the curved
+            # finger is fatter than the rendered mesh and is not drawn, so a
+            # firm grasp still shows a gap.
             tool = kin.fk(q[:5])[0]
             if (cube[2] > grasp_z + succ["lift_height"]
                     and np.linalg.norm(cube - tool) < succ["max_ee_distance"]):
