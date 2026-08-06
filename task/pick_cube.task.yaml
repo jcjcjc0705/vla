@@ -141,24 +141,24 @@ overrides:
     damping_ratio: 0.8
 
   finger_colliders:
-    # ⚠️ 不要退回 convexHull。手指的夾持面是弧形的,內表面起伏 18.5 mm
-    # (量兩根手指的 collider mesh 得到),凸包會把那個凹陷整個填平 —— 方塊
-    # 只接觸到最外圈的邊緣,中間空著,GUI 裡看得到那條縫。
+    # 手指的夾持面是弧形的,內表面起伏 18.5mm(量兩根 collider mesh 得到),
+    # 所以任何凸性近似都會把凹陷填掉一部分。
     #
-    # 抓得起來,但接觸從「面」變成「兩道邊緣」:摩擦分布、可承受的力矩、
-    # 以及「張開多少才夾得住」全都跟真手臂不一樣。那是 sim2real 的失真,
-    # 不是視覺瑕疵。
+    # convexHull 與 convexDecomposition 都試過,選 convexHull:
+    #   * 兩者都是**過度**近似。凸塊是頂點子集的凸包,聯集必然 ⊇ 原始網格 ——
+    #     分解只是換個地方胖,不是變忠實。實測夾得很穩時兩側都出現明顯的縫。
+    #   * 功能上等價:analytic 與 moveit 兩種解算器下都是 20/20。
+    #   * 分解讓相機從 12.0 掉到 9.4 Hz(目標 30),而且**視覺判讀失效** ——
+    #     凸塊比網格胖又不被算繪,「看起來沒碰到」變成沒有資訊。這一段開發
+    #     裡用眼睛看是最有效的診斷管道,不值得為了一個等價的近似關掉它。
     #
-    # 還不夠的話下一步是 pads(見下方),不是回頭調近似方式。
-    #
-    # ⚠️ 換成 convexDecomposition 之後,**不能再用眼睛判斷有沒有夾到**。
-    # 分解出來的凸塊比原始網格胖,而且沒有被算繪 —— 接觸發生在看不見的
-    # 表面上,GUI 裡看起來兩邊都有明顯的縫,方塊卻穩穩懸在 89mm 高。
-    # 判斷夾住與否只有兩個依據:方塊高度、以及它有沒有在動。
+    # 接觸幾何若真的變成瓶頸,下一步是 pads(明確給一個平整夾持面),
+    # 不是換近似方式。
     prims:
       - "/colliders/link6/follower_07_gripper_motorized/node_STL_BINARY_"
       - "/colliders/link7/follower_08_gripper_gear/node_STL_BINARY_"
-    approximation: "convexDecomposition"
+    approximation: "convexHull"
+
   pads:
     # 最後手段:在兩根手指內側各加一片薄板當夾持面。
     enabled: false
