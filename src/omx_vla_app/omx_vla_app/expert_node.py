@@ -2,6 +2,7 @@
 
     ros2 run omx_vla_app expert                       # 5 episodes
     ros2 run omx_vla_app expert --ros-args -p episodes:=20 -p holdout:=true
+    ros2 run omx_vla_app record --ros-args -p episodes:=5   # 同上,外加寫出資料
 
 Isaac is opened by hand and **Play must be running**. Nothing here starts a
 simulator: the arm is driven through the same ``/sync/command`` seam ``jog`` uses,
@@ -11,11 +12,15 @@ come from stock nodes in the task scene's ActionGraph.
 The state machine and the kinematics are imported from ``vla/sim/`` unchanged --
 there is exactly one expert.
 
-⚠️ **Unsolved, and it decides how M4 is written.** The control loop is wall-clock,
-and states, actions and images arrive on separate topics with separate timing.
-A recorder that re-subscribes to those topics would teach the policy the DDS
-jitter. Take ``state`` and ``action`` from **this node's own tick** -- both are
-already in hand in the same iteration -- and match images by timestamp.
+On time alignment: ``state`` and ``action`` are taken from the same iteration of
+the control loop, so ``action[t]`` is the command issued at ``state[t]``. Images
+cannot be -- they arrive on their own topic at the renderer's pace -- so each
+recorded frame carries the image's age instead of pretending it is simultaneous.
+
+⚠️ **Still open:** what the converter should do with a stale image. On this
+laptop the cameras publish at ~12 Hz against a 30 Hz control loop, so roughly
+every second frame repeats pixels. Deciding that needs the recording rate the
+data will actually be collected at.
 """
 from __future__ import annotations
 
@@ -37,6 +42,7 @@ from tf2_msgs.msg import TFMessage
 from omx_bridge_app import ros_args
 
 from .isaac_prim import IsaacPrim, IsaacPrimError
+from .recorder import Recorder
 
 VLA_ROOT = os.environ.get("VLA_ROOT", "/vla")
 if f"{VLA_ROOT}/sim" not in sys.path:
@@ -101,7 +107,14 @@ class ExpertClient(Node):
                           2.0 * math.atan2(float(r.z), float(r.w)))
 
     def _on_image(self, msg, name):
-        self._frames[name] = msg
+        # Arrival time, not msg.header.stamp: Isaac stamps images with
+        # **simulation** time by default, which is a different clock from the
+        # one the control loop runs on. Subtracting the two gives nonsense.
+        self._frames[name] = (msg, time.time())
+
+    def frames(self):
+        """Latest ``(msg, arrived_at)`` per camera; None if none has arrived."""
+        return {n: self._frames.get(n) for n in self.cfg["ros"]["camera_topics"]}
 
     def save_frames(self, tag, out_dir="/vla/data/diag"):
         """Write whatever each camera last sent. Returns the paths written."""
@@ -111,7 +124,7 @@ class ExpertClient(Node):
 
         os.makedirs(out_dir, exist_ok=True)
         written = []
-        for name, msg in list(self._frames.items()):
+        for name, (msg, _) in list(self._frames.items()):
             arr = np.frombuffer(msg.data, dtype=np.uint8)
             try:
                 arr = arr.reshape(msg.height, msg.width, -1)[:, :, :3]
@@ -261,7 +274,7 @@ class ExpertClient(Node):
         return False
 
 
-def run_episode(client, expert, kin, cfg, pos, yaw, snap=None):
+def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
     """Reset, run the state machine, return (success, phase, ticks)."""
     grip = cfg["gripper"]
     succ = cfg["success"]
@@ -303,7 +316,15 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None):
             client.save_frames(f"{snap}_p{expert.phase}")
         if finished:
             break
+
+        # The recorded pair comes from **this** iteration: `state` was measured
+        # to produce `targets`, so action[t] really is the command issued at
+        # state[t]. Re-subscribing to the two topics instead would pair them by
+        # arrival time and teach the policy the transport jitter.
+        state = client.joints()
         client.send(targets)
+        if rec is not None:
+            rec.frame(state, targets, client.frames(), time.time())
         time.sleep(period)
         if expert.phase in (LIFT, HOLD):
             cube = client.cube()[0]
@@ -320,7 +341,7 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None):
     return ok, expert.phase, expert.ticks, residual, lag
 
 
-def main(argv=None):
+def main(argv=None, record=False):
     argv = list(sys.argv if argv is None else argv)
     rclpy.init(args=ros_args(argv, "profile", extra=["-p", "mode:=command",
                                                      "-p", "targets:=sim"]))
@@ -342,6 +363,7 @@ def main(argv=None):
     client.declare_parameter("save_frames", False)
     client.declare_parameter("theta_deg", 999.0)   # 999 = 照常隨機取樣
     client.declare_parameter("radius", 0.0)
+    client.declare_parameter("out", "/vla/data/raw")
     episodes = client.get_parameter("episodes").value
     holdout = client.get_parameter("holdout").value
     seed = client.get_parameter("seed").value
@@ -368,6 +390,7 @@ def main(argv=None):
                 and client.prim.wait_for_isaac()):
             raise SystemExit(1)
 
+        rec = Recorder(cfg, client.get_parameter("out").value) if record else None
         expert = PickCubeExpert(cfg, kin, seed=seed)
         rng = np.random.default_rng(seed)
         wins, fails, residuals, lags = 0, {}, [], []
@@ -380,8 +403,16 @@ def main(argv=None):
                 pos = np.array([r * math.cos(a), r * math.sin(a),
                                 cfg["cube"]["size"] / 2])
             snap = f"ep{i + 1:02d}_r{r * 1000:.0f}_t{th:+.0f}" if save_frames else None
+            if rec is not None:
+                rec.begin(i + 1, {"seed": seed, "episode": i + 1,
+                                  "holdout": bool(holdout),
+                                  "cube": {"r": float(r), "theta_deg": float(th),
+                                           "yaw_rad": float(yaw),
+                                           "requested": [float(v) for v in pos]}})
             ok, phase, ticks, residual, lag = run_episode(
-                client, expert, kin, cfg, pos, yaw, snap)
+                client, expert, kin, cfg, pos, yaw, snap, rec)
+            if rec is not None:
+                rec.end(ok)
             if lag == lag:
                 lags.append(lag)
             wins += ok
@@ -408,6 +439,9 @@ def main(argv=None):
         if client.place_retries:
             print(f"方塊放置重試 {client.place_retries} 次 / {episodes} 集")
 
+        if rec is not None:
+            print(rec.summary())
+
         rate = wins / max(episodes, 1)
         print(f"\n成功 {wins}/{episodes} = {rate * 100:.0f}%"
               + (f"   失敗分佈 {fails}" if fails else ""))
@@ -422,6 +456,11 @@ def main(argv=None):
         if rclpy.ok():
             rclpy.shutdown()
     return rc
+
+
+def record_main(argv=None):
+    """Same run, plus a raw dump of every successful episode."""
+    return main(argv, record=True)
 
 
 if __name__ == "__main__":
