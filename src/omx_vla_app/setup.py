@@ -19,6 +19,7 @@ setup(
     entry_points={
         'console_scripts': [
             'expert = omx_vla_app.expert_node:main',
+            'record = omx_vla_app.expert_node:record_main',
         ],
     },
 )
