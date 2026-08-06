@@ -287,18 +287,19 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
         here = client.cube()
         print(f"      ✗ 方塊沒有到位:目標 {np.round(pos, 3)},"
               f" 實際 {np.round(here[0], 3) if here else '讀不到'}")
-        return False, FAILED, 0, None, float('nan')
+        return False, FAILED, 0, None, float('nan'), (float('nan'),) * 2
 
     at, at_yaw = client.cube()
     if not expert.reset(client.joints(), at, at_yaw):
         print(f"      ✗ 規劃不了:{expert.reject_reason}"
               f"   (要求放在 {np.round(pos, 4)})")
-        return False, FAILED, 0, None, float('nan')
+        return False, FAILED, 0, None, float('nan'), (float('nan'),) * 2
 
     ok = False
     held = []
     shot = set()
     lag = float("nan")
+    grasp_pitch = grasp_tilt = float("nan")
     while True:
         phase_before = expert.phase
         measured = kin.fk(client.joints()[:5])[0]
@@ -308,6 +309,9 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
             # close. Should stay a few mm; it was ~14 before the settle gate.
             lag = float(np.linalg.norm(
                 expert.tool - kin.fk(client.joints()[:5])[0]))
+            R = kin.link5_frame(client.joints()[:5])[1]
+            grasp_pitch = math.degrees(math.asin(-(R @ np.array([1., 0, 0]))[2]))
+            grasp_tilt = math.degrees(math.asin(abs((R @ np.array([0, 1., 0]))[2])))
         if snap and phase_before != expert.phase and expert.phase not in shot:
             # One frame per phase transition. The two that matter are entering
             # CLOSE (are the fingers around the cube?) and entering LIFT (did it
@@ -338,7 +342,7 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
                 # printout at the end of a run for what this can and cannot say.
                 held.append(kin.in_ee(q[:5], cube))
     residual = np.mean(held, axis=0) if held else None
-    return ok, expert.phase, expert.ticks, residual, lag
+    return ok, expert.phase, expert.ticks, residual, lag, (grasp_pitch, grasp_tilt)
 
 
 def main(argv=None, record=False):
@@ -354,7 +358,6 @@ def main(argv=None, record=False):
 
     profile_path = engine.get_parameter("profile").get_parameter_value().string_value
     cfg = task_config.load()
-    kin = OMXKinematics(cfg)
     client = ExpertClient(load_profile(profile_path), cfg)
 
     client.declare_parameter("episodes", 5)
@@ -364,6 +367,23 @@ def main(argv=None, record=False):
     client.declare_parameter("theta_deg", 999.0)   # 999 = 照常隨機取樣
     client.declare_parameter("radius", 0.0)
     client.declare_parameter("out", "/vla/data/raw")
+    # Three solvers, same interface, chosen at run time so they can be compared
+    # by success rate rather than argued about:
+    #   moveit         MoveIt's KDL plugin with ROBOTIS's own omx_f config
+    #   analytic       sim/ik.py -- closed form, gripper held pointing down
+    #   position_only  a damped-least-squares stand-in for MoveIt, no install
+    client.declare_parameter("ik", "moveit")
+    which = client.get_parameter("ik").value
+    analytic = OMXKinematics(cfg, position_only=(which == "position_only"))
+    if which == "moveit":
+        from .moveit_ik import MoveItKinematics
+        kin = MoveItKinematics(cfg, OMXKinematics(cfg))
+    elif which in ("analytic", "position_only"):
+        kin = analytic
+    else:
+        print(f"[expert] 不認得的 ik:={which}(要 moveit / analytic / position_only)")
+        raise SystemExit(2)
+    print(f"[expert] IK = {which}")
     episodes = client.get_parameter("episodes").value
     holdout = client.get_parameter("holdout").value
     seed = client.get_parameter("seed").value
@@ -393,7 +413,7 @@ def main(argv=None, record=False):
         rec = Recorder(cfg, client.get_parameter("out").value) if record else None
         expert = PickCubeExpert(cfg, kin, seed=seed)
         rng = np.random.default_rng(seed)
-        wins, fails, residuals, lags = 0, {}, [], []
+        wins, fails, residuals, lags, geoms = 0, {}, [], [], []
         for i in range(episodes):
             pos, yaw, r, th = sample_cube_pose(cfg, rng, holdout)
             if fixed_theta < 900.0:            # 重現某個特定位置
@@ -409,8 +429,9 @@ def main(argv=None, record=False):
                                   "cube": {"r": float(r), "theta_deg": float(th),
                                            "yaw_rad": float(yaw),
                                            "requested": [float(v) for v in pos]}})
-            ok, phase, ticks, residual, lag = run_episode(
+            ok, phase, ticks, residual, lag, geom = run_episode(
                 client, expert, kin, cfg, pos, yaw, snap, rec)
+            geoms.append(geom)
             if rec is not None:
                 rec.end(ok)
             if lag == lag:
@@ -433,6 +454,11 @@ def main(argv=None, record=False):
             print(f"\n夾持殘差(方塊在 end_effector_link 座標系,mm):"
                   f" {np.round(got, 2)} ±{np.round(se, 2)}"
                   f"   設定 {np.round(want, 2)}   (n={n})")
+        G = np.array([g for g in geoms if g[0] == g[0]])
+        if len(G):
+            print(f"夾合瞬間夾爪俯仰角: 平均 {G[:,0].mean():.1f}°  範圍 "
+                  f"{G[:,0].min():.1f}~{G[:,0].max():.1f}°   "
+                  f"開合軸偏離水平 最大 {G[:,1].max():.1f}°")
         if lags:
             L = np.array(lags) * 1000
             print(f"夾合瞬間手臂落後命令(mm):平均 {L.mean():.1f}  最大 {L.max():.1f}")
