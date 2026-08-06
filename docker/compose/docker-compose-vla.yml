@@ -13,10 +13,10 @@ name: omx_vla
 
 services:
   vla:
-    # 釘住版本而不是追 :latest。這裡對 image 的相依是硬的 —— 引擎、profile、
-    # jog、MoveIt 解算器、Isaac prim 服務介面全部在 image 裡,原始碼比 image
-    # 新的時候只會得到一行 ModuleNotFoundError。
-    image: registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image:0.2.0
+    # 引擎、profile、jog、MoveIt 解算器、Isaac prim 服務介面都在這個 image 裡。
+    # 這裡的原始碼如果比 image 新,症狀是一行 ModuleNotFoundError —— 先
+    # docker compose pull。
+    image: registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image:latest
     container_name: omx_vla
     network_mode: host
     ipc: host
