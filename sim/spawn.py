@@ -1,26 +1,21 @@
-"""Where the cube goes each episode -- the one sampler, used by every runner.
+"""Where the cube goes each episode -- the one sampler, shared by every caller.
 
-Pure Python + numpy, no Isaac and no ROS, so the headless runs, the GUI helper
-and the ROS node all import *this* rather than each keeping a copy. Three copies
-of a distribution is three chances for the training set and the evaluation set to
-stop meaning what they say.
+Pure Python + numpy, no Isaac and no ROS. One copy on purpose: three copies of a
+distribution is three chances for the training set and the evaluation set to stop
+meaning what they say.
 
 **The held-out bands sit inside the sweep, not at its edge, and there are two of
 them.** That combination is what makes M5's acceptance criterion mean anything:
 
-* A policy that ignores the image replays roughly the *mean* trajectory. It
-  succeeds near the middle of the training distribution and fails away from it --
-  so a held-out band in the middle would be the one place such a policy passes.
-* A band at the edge instead tests extrapolation, and then a failure has two
-  possible causes -- "not looking" and "never saw that part of the workspace" --
-  which is exactly the distinction M5 exists to make.
+* A policy that ignores the image replays roughly the *mean* trajectory, so a
+  band in the middle is the one place such a policy passes.
+* A band at the edge tests extrapolation, and then a failure has two possible
+  causes -- "not looking" and "never saw that part of the workspace" -- which is
+  the distinction M5 exists to make.
 
-Two bands placed symmetrically inside the sweep are far from the mean (so a
-trajectory-replaying policy fails) while still bracketed by training data on both
-sides (so a policy that reads the image can interpolate). They also leave the
-training distribution centred on zero, which a single edge band does not: cutting
-[-50,-30] out of [-50,50] leaves a mean of +10 degrees and 62% of cubes on one
-side.
+Two symmetric interior bands are far from the mean (a trajectory-replaying policy
+fails there) while bracketed by training data on both sides (a policy that reads
+the image can interpolate), and they leave the training distribution centred.
 """
 from __future__ import annotations
 

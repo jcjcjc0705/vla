@@ -1,13 +1,16 @@
-"""The pick-cube episode: reset, step, observe, decide success.
+"""The pick-cube episode driven from **inside** a SimulationApp.
 
-Import this **after** ``app.start()`` -- the isaacsim modules it needs only exist
-once the SimulationApp is up.
+Episodes normally run over ROS against an Isaac you opened yourself
+(``ros2 run omx_vla_app expert``). This is the in-process path, and its one
+remaining user is ``ik.py --isaac``, which drives the articulation directly to
+check that the URDF kinematics and the USD agree.
 
-Everything numeric comes from ``task/pick_cube.task.yaml``. Joint order comes
-from ``sim_real_bridge.profile`` via task_config.py, so the vector this produces is
-already a valid ``/sync/command`` payload: same six joints, same order, radians,
-USD frame. That is the seam that lets the eventual policy drive the real arm
-without reinterpreting anything.
+Import it **after** ``app.start()`` -- the isaacsim modules only exist once the
+SimulationApp is up.
+
+Joint order comes from ``sim_real_bridge.profile`` via task_config.py, so the
+vector this produces is already a valid ``/sync/command`` payload: same six
+joints, same order, radians, USD frame.
 """
 from __future__ import annotations
 
@@ -106,10 +109,8 @@ class PickCubeScene:
             self.world.step(render=False)
 
         # Flush the renderer's temporal history before anyone looks through a
-        # camera. RTX accumulates across frames, so right after a reset the
-        # image still shows the *previous* episode -- and a few frames later it
-        # shows the new cube plus a ghost of the old one. Physics-only steps do
-        # not advance it; only rendered frames do. See timing.reset_render_frames.
+        # camera: RTX accumulates across frames and physics-only steps do not
+        # advance it, so a fresh reset would still show the previous episode.
         for _ in range(self.cfg["timing"]["reset_render_frames"] if self.cameras else 0):
             self.world.step(render=True)
 
@@ -129,15 +130,10 @@ class PickCubeScene:
     def set_targets(self, canonical):
         """Command the six canonical joints, in radians (== the USD frame).
 
-        This vector is exactly what would go on ``/sync/command``.
-
-        ``apply_action`` sets the **drive targets** and lets the PD drives track
-        them, which is what a position command means. ``set_joint_positions``
-        would teleport the joints instead -- no contact forces, no dynamics, and
-        a grasp test that always "succeeds".
-
-        Only the six canonical indices are addressed, so the passive mimic joint
-        is left to PhysX rather than being commanded behind its own constraint.
+        ``apply_action`` sets the **drive targets**, which is what a position
+        command means; ``set_joint_positions`` would teleport the joints instead
+        -- no contact forces, no dynamics. Only the six canonical indices are
+        addressed, leaving the passive mimic joint to PhysX.
         """
         from isaacsim.core.utils.types import ArticulationAction
 
@@ -156,8 +152,8 @@ class PickCubeScene:
     def joint_positions(self):
         """Measured joint positions -- not the commanded targets.
 
-        Recording the command as the state would teach the policy an identity
-        map: excellent training loss, useless behaviour.
+        Recording the command as the state teaches the policy an identity map:
+        excellent training loss, useless behaviour.
         """
         return np.asarray(self.arm.get_joint_positions(), dtype=np.float32)[self.dof_index]
 
@@ -197,10 +193,9 @@ class PickCubeScene:
     def success(self):
         """Lifted, still held, and stayed that way.
 
-        ``held`` is what rejects a cube that was merely flicked into the air;
-        requiring consecutive steps is what rejects a momentary bounce. A single
-        instantaneous check passes for both of those, which is why neither term
-        is optional.
+        ``held`` rejects a cube merely flicked into the air; the consecutive
+        count rejects a momentary bounce. A single instantaneous check passes
+        for both, so neither term is optional.
         """
         s = self.cfg["success"]
         cube = self.cube_pose()[0]

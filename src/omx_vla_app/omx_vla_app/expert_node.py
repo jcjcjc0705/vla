@@ -4,21 +4,18 @@
     ros2 run omx_vla_app expert --ros-args -p episodes:=20 -p holdout:=true
 
 Isaac is opened by hand and **Play must be running**. Nothing here starts a
-simulator and nothing here touches Isaac's Python: the arm is driven through the
-same ``/sync/command`` seam ``jog`` uses, and the cube is read over ``tf2_msgs`` and
-moved over Isaac's own prim service -- two stock nodes in the task scene's
-ActionGraph, no Isaac-side scripting.
+simulator: the arm is driven through the same ``/sync/command`` seam ``jog`` uses,
+the cube is read over ``tf2_msgs`` and moved over Isaac's prim service, and both
+come from stock nodes in the task scene's ActionGraph.
 
-The state machine and the kinematics are imported from ``vla/sim/`` unchanged.
-``expert.py`` and ``ik.py`` never imported ``isaacsim`` -- only numpy -- so the
-same code that ran headless runs here. There is exactly one expert.
+The state machine and the kinematics are imported from ``vla/sim/`` unchanged --
+there is exactly one expert.
 
-What this arrangement costs, stated plainly because it decides how M4 is written:
-the control loop is now wall-clock rather than a fixed number of physics steps,
-and states, actions and (later) images travel on separate topics with separate
-timing. Recording by re-subscribing to those topics would teach a policy the DDS
-jitter. Record ``state`` and ``action`` from **this node's own tick** -- both are
-already in hand in the same iteration.
+⚠️ **Unsolved, and it decides how M4 is written.** The control loop is wall-clock,
+and states, actions and images arrive on separate topics with separate timing.
+A recorder that re-subscribes to those topics would teach the policy the DDS
+jitter. Take ``state`` and ``action`` from **this node's own tick** -- both are
+already in hand in the same iteration -- and match images by timestamp.
 """
 from __future__ import annotations
 
@@ -77,9 +74,8 @@ class ExpertClient(Node):
         self.create_subscription(JointState, ep.state_topic, self._on_state, 10)
         self.create_subscription(TFMessage, ros["cube_tf_topic"], self._on_tf, 100)
 
-        # Both cameras, kept as the latest frame only. Nothing is written unless
-        # somebody asks -- this is for looking at a specific moment, not a
-        # recorder; M4's recorder must take its frames from the control tick.
+        # Latest frame only, written on request. This is for looking at a
+        # specific moment, not a recorder.
         self._frames = {}
         for name, topic in ros["camera_topics"].items():
             self.create_subscription(
@@ -168,9 +164,9 @@ class ExpertClient(Node):
     def go_home(self, gripper_open, settle=3.0, tol=0.02):
         """Command home and wait until the twin is actually there.
 
-        Waiting on the measurement rather than sleeping a fixed time: how long
-        the drives take depends on where the last episode left the arm, and
-        starting the next episode mid-motion silently truncates it.
+        On the measurement rather than a fixed sleep: how long the drives take
+        depends on where the last episode left the arm, and starting the next
+        episode mid-motion silently truncates it.
         """
         home = np.zeros(len(self.profile.joints))
         home[self.profile.joints.index(self.cfg["gripper"]["joint"])] = gripper_open
@@ -186,11 +182,10 @@ class ExpertClient(Node):
     def wait_for_release(self, timeout=2.0):
         """Wait until the cube is back on the floor before moving it.
 
-        The previous episode ends **holding** the cube. go_home opens the
-        gripper, but it returns as soon as the joints are in tolerance -- the
-        cube is still falling, and may still be between the fingers. Teleporting
-        it then puts it inside the finger geometry, PhysX pushes it straight back
-        out, and the reset looks like a failed write.
+        The previous episode ends holding it, and ``go_home`` returns as soon as
+        the joints are in tolerance -- while the cube may still be between the
+        fingers. Teleporting it then puts it inside the finger geometry and
+        PhysX pushes it straight back out.
         """
         floor = self.cfg["cube"]["size"] / 2
         deadline = time.monotonic() + timeout
@@ -224,13 +219,11 @@ class ExpertClient(Node):
     def _wait_placed(self, position, settle, still_tol):
         """Did the cube arrive and stop moving?
 
-        Checked through TF rather than trusted: a write that quietly does
-        nothing leaves the cube where the last episode left it, which reads as a
-        policy failure rather than a plumbing failure.
-
-        Waiting for stillness instead of zeroing the velocity: momentum survives
-        a teleport, TF carries no velocity, and "has stopped" is what is actually
-        wanted anyway.
+        Checked through TF rather than trusted: a write that quietly does nothing
+        leaves the cube where the last episode left it, which reads as a policy
+        failure rather than a plumbing failure. Stillness rather than zeroed
+        velocity, because TF carries no velocity and "has stopped" is the
+        property actually wanted.
         """
         deadline = time.monotonic() + settle
         arrived = False
@@ -252,14 +245,10 @@ class ExpertClient(Node):
     def place_cube(self, position, yaw, settle=2.0, still_tol=1e-4, attempts=3):
         """Teleport the cube where the episode wants it, retrying if it does not go.
 
-        The write occasionally does not take -- a race between the service
-        applying the USD edit and PhysX owning the body, most likely. It is rare
-        and it is transient, and both of those are reasons to retry rather than
-        to fail: an unattended 200-episode recording cannot afford to drop
-        episodes to something a second attempt fixes.
-
-        Retrying means **re-issuing the write**, not just waiting longer; the
-        failure is the write not landing, so more patience alone does nothing.
+        ⚠️ The write occasionally does not take -- about 1 episode in 20, root
+        cause unconfirmed, most likely a race between the service applying the
+        USD edit and PhysX owning the body. Retrying means **re-issuing the
+        write**, not waiting longer: the failure is the write not landing.
         """
         for attempt in range(1, attempts + 1):
             if self._write_pose(position, yaw) and self._wait_placed(
@@ -302,15 +291,14 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None):
         measured = kin.fk(client.joints()[:5])[0]
         targets, finished = expert.act(measured)
         if phase_before != expert.phase and expert.phase == CLOSE:
-            # How far behind the command is the arm when the fingers start to
-            # close? The state machine declares arrival on the **commanded**
-            # tool position; the drives are still catching up.
+            # How far behind the command the arm is when the fingers start to
+            # close. Should stay a few mm; it was ~14 before the settle gate.
             lag = float(np.linalg.norm(
                 expert.tool - kin.fk(client.joints()[:5])[0]))
         if snap and phase_before != expert.phase and expert.phase not in shot:
-            # One frame per phase transition: the interesting moments are
-            # entering CLOSE (are the fingers around the cube?) and entering
-            # LIFT (did it actually get picked up?).
+            # One frame per phase transition. The two that matter are entering
+            # CLOSE (are the fingers around the cube?) and entering LIFT (did it
+            # actually get picked up?).
             shot.add(expert.phase)
             client.save_frames(f"{snap}_p{expert.phase}")
         if finished:
@@ -320,16 +308,13 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None):
         if expert.phase in (LIFT, HOLD):
             cube = client.cube()[0]
             q = client.joints()
-            # Distance to the **pinch point**, from the measured joints -- it is
-            # the point the cube is actually held at, and it costs no round trip.
+            # Distance to the **pinch point**, from the measured joints.
             tool = kin.fk(q[:5])[0]
             if (cube[2] > grasp_z + succ["lift_height"]
                     and np.linalg.norm(cube - tool) < succ["max_ee_distance"]):
                 ok = True
-                # Where the cube actually ended up, in the gripper's own frame.
-                # gripper.grasp_offset says where the fingers pinch; if the two
-                # disagree the arm is aiming a few mm off the cube's centre every
-                # single time, which is a bias baked into every demonstration.
+                # Where the cube ended up, in the gripper's own frame -- see the
+                # printout at the end of a run for what this can and cannot say.
                 held.append(kin.in_ee(q[:5], cube))
     residual = np.mean(held, axis=0) if held else None
     return ok, expert.phase, expert.ticks, residual, lag

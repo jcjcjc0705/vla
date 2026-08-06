@@ -8,14 +8,13 @@ the same machine.
 Two rules this file exists to enforce:
 
 * ``omx_f.usd`` is **never modified**. It is part of the sim<->real calibration
-  chain that the user's ``jog`` / ``to_sim`` / ``to_real`` tools depend on.
-  Everything here is an override layered on top of it.
+  chain that ``jog`` / ``to_sim`` / ``to_real`` depend on. Everything here is an
+  override layered on top of it.
 * It is brought in as a **sublayer, not a reference**. ``omx_f.usd`` is a
-  flattened stage: its root layer holds 16 ``Flattened_Prototype_*`` specs plus
-  root-scope ``/visuals``, ``/colliders`` and ``/meshes``, and
-  ``link6/collisions`` points at those prototypes internally. Referencing the
-  default prim would leave all of that dangling and **silently** drop every bit
-  of visual and collision geometry -- the stage still opens, it is just empty.
+  flattened stage whose root layer holds the ``Flattened_Prototype_*`` specs that
+  ``link6/collisions`` points at. A reference to the default prim leaves those
+  dangling and silently drops every bit of visual and collision geometry -- the
+  stage still opens, it is just empty.
 
 The generated USD is a build artifact and is gitignored; regenerate it rather
 than copying it between machines.
@@ -55,13 +54,9 @@ def define_camera(stage, path, spec, parent_relative=False):
     cam.CreateVerticalApertureAttr(aperture_v)
     cam.CreateClippingRangeAttr(Gf.Vec2f(*spec["clipping"]))
 
-    # Both cameras are aimed with look-at rather than hand-turned Euler angles.
-    # The first wrist camera was written as a rotation and ended up facing
-    # backwards at the arm's base, then 13 degrees too high once the sign was
-    # fixed. Naming the point to look at cannot go wrong in either way.
-    #
-    # USD cameras face -Z, and SetLookAt returns a world->view matrix, so the
-    # camera's transform is its inverse. For a parented camera the same maths is
+    # Aimed by naming the point to look at rather than by a hand-turned rotation.
+    # USD cameras face -Z and SetLookAt returns a world->view matrix, so the
+    # camera's transform is its inverse; for a parented camera the same maths is
     # done in the parent's frame.
     eye, target = ((spec["translate"], spec["look_at"]) if parent_relative
                    else (spec["eye"], spec["target"]))
@@ -84,10 +79,9 @@ def define_cube(stage, path, spec, material):
     cube.CreateDisplayColorAttr([Gf.Vec3f(*spec["color"])])
     # Spawned properly by scene.py each episode; this is just a sane resting
     # place so the generated stage opens with the cube visible on the ground.
-    # Both ops are authored even though the resting pose needs neither rotated
-    # nor animated: an episode reset over the ROS prim service can only *write*
-    # attributes that already exist, so a cube with no orient op could never be
-    # given a yaw from outside Isaac.
+    # Both ops are authored even though the resting pose needs neither: a reset
+    # over the prim service can only **write attributes that already exist**, so
+    # a cube with no orient op could never be given a yaw from outside Isaac.
     x = UsdGeom.Xformable(cube)
     x.AddTranslateOp().Set(Gf.Vec3d(0.21, 0.0, size / 2))
     x.AddOrientOp().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
@@ -141,9 +135,9 @@ def editable_source(stage, prim_path):
     ``/Flattened_Prototype_N`` prim; that one is a normal prim in this stage's
     layer stack, so an override there composes through.
 
-    Do not guess the prototype path by name. ``/visuals/link5/mesh_1`` looks like
-    the source of ``/omx_f/link5/visuals/mesh_1`` and is not -- it is a separate,
-    unused copy, so authoring there is a silent no-op. Ask the prim index.
+    **Do not guess the prototype path by name.** ``/visuals/link5/mesh_1`` looks
+    like the source of ``/omx_f/link5/visuals/mesh_1`` and is a separate, unused
+    copy; authoring there is a silent no-op. Ask the prim index.
 
     Returns ``(path, None)`` for a prim that is already editable, or
     ``(resolved_path, reason)`` where ``reason`` is set when resolution failed.
@@ -215,11 +209,10 @@ def add_cube_tf_nodes(stage, cfg, report):
       request, used a handful of times per episode.
 
     ``ROS2SubscribeTransformTree`` looks like the obvious writer and is not: it
-    modifies **articulation roots**, and a loose rigid body is not one. Measured
-    2026-08-05 -- Isaac subscribes to the topic, receives the transform, and the
-    cube does not move, under four different frame-naming conventions. Writing
-    ``xformOp:translate`` *does* move it mid-simulation (also measured), which is
-    what the service does.
+    modifies **articulation roots**, and a loose rigid body is not one. Isaac
+    subscribes, receives the transform, and the cube does not move -- under any
+    frame naming. Writing ``xformOp:translate`` does move it mid-simulation,
+    which is what the service does.
     """
     graph = f"{cfg.robot_root}/ActionGraph"
     if not stage.GetPrimAtPath(graph).IsValid():
@@ -246,11 +239,10 @@ def add_cube_tf_nodes(stage, cfg, report):
         "isaacsim.ros2.bridge.ROS2ServicePrim")
     svc.CreateAttribute("node:typeVersion", Sdf.ValueTypeNames.Int).Set(1)
     svc.CreateAttribute("inputs:execIn", Sdf.ValueTypeNames.UInt).AddConnection(tick)
-    # Every name is authored explicitly. A node written straight into USD does
-    # **not** pick up the .ogn defaults -- an unauthored string input reads as
-    # empty, and an empty service name advertises nothing at all. The first
-    # version of this authored only node:type and execIn, and Isaac ran it
-    # happily while offering no services.
+    # Every name is authored explicitly: a node written straight into USD does
+    # **not** pick up the .ogn defaults. An unauthored string input reads as
+    # empty, an empty service name advertises nothing, and Isaac does not
+    # complain.
     for port, value in (
             ("getAttributeServiceName", "get_prim_attribute"),
             ("getAttributesServiceName", "get_prim_attributes"),
@@ -272,14 +264,8 @@ def add_cube_tf_nodes(stage, cfg, report):
 def add_camera_nodes(stage, cfg, report):
     """Publish both cameras on ROS.
 
-    Needed twice over: M4 records from these, and until they exist the only way
-    to see why a grasp failed is to describe it in numbers. A render product has
-    to be created for each camera first -- ``ROS2CameraHelper`` publishes *a
-    render product*, not a camera prim.
-
-    Resolution comes from the same ``cameras.<name>.resolution`` the offline
-    renders use, so what arrives over ROS and what ``preview_cameras.py`` writes
-    are the same image.
+    A render product has to be created for each camera first --
+    ``ROS2CameraHelper`` publishes *a render product*, not a camera prim.
     """
     graph = f"{cfg.robot_root}/ActionGraph"
     tick = Sdf.Path(f"{graph}/on_playback_tick.outputs:tick")
@@ -437,8 +423,7 @@ def build(cfg: task_config.Config, force: bool) -> int:
     for p in ov["hide"]["prims"]:
         # Check the path that was **asked** for, on a fresh open -- not the path
         # that was written to. Checking the latter passes even when the override
-        # landed on an unrelated prim, which is exactly how the first version of
-        # this hid the wrong copy of the marker and still reported success.
+        # landed on an unrelated prim.
         target = check.GetPrimAtPath(p)
         vis = (UsdGeom.Imageable(target).ComputeVisibility()
                if target and target.IsValid() else "prim 不存在")

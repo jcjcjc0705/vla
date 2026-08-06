@@ -1,6 +1,6 @@
 """Closed-form kinematics for the OMX follower, specialised to top-down grasps.
 
-Why closed form rather than Lula (the original plan's first choice):
+Why closed form rather than a numerical solver such as Lula:
 
 * The arm is ``joint1`` yaw + ``joint2/3/4`` **parallel** pitch + ``joint5`` roll.
   Fix the gripper pointing straight down and the three pitch joints must sum to
@@ -11,10 +11,9 @@ Why closed form rather than Lula (the original plan's first choice):
 * Lula also needs a hand-written c-space descriptor whose parameters are guesses.
 
 The classic trap in hand-rolled OMX IK is the elbow offset: ``joint2 -> joint3``
-is ``(0.0415, 0, 0.11315)``, i.e. **20.15 degrees off vertical**, and dropping it
-biases every solution. It is not dropped here -- that link is carried as a vector
-with its own angle -- and ``--check`` closes the loop by running FK on every
-solution, so the trap cannot survive silently.
+is ``(0.0415, 0, 0.11315)``, **20.15 degrees off vertical**, and dropping it
+biases every solution. That link is carried here as a vector with its own angle,
+and ``--check`` runs FK on every solution so the trap cannot survive silently.
 
 Geometry is read from the URDF rather than written down, so it cannot drift.
 
@@ -128,10 +127,8 @@ class OMXKinematics:
         """``world_point`` in the **end_effector_link** frame.
 
         This is the frame ``gripper.grasp_offset`` is written in, so a measured
-        value can be compared with the configured one directly. Measuring in
-        link5's frame instead is off by the fixed 91.9 mm end-effector joint
-        offset -- a difference big enough to look like a catastrophe and small
-        enough in the other axes to look plausible.
+        value compares with the configured one directly. Measuring in link5's
+        frame instead is off by the fixed 91.9 mm end-effector joint offset.
 
         ``end_effector_joint`` carries no rotation, so the two frames share an
         orientation and this is a translation only.
@@ -247,7 +244,7 @@ class OMXKinematics:
 
 
 def check(cfg, n):
-    """Round-trip every solution through FK. This is what kills the offset trap."""
+    """Round-trip every solution through FK -- the check that kills the offset trap."""
     kin = OMXKinematics(cfg)
     print(f"URDF: {cfg.robot_urdf}")
     print(f"  肩 (yaw 軸上) = ({kin.yaw_xy[0]:.5f}, {kin.yaw_xy[1]:.5f}, {kin.shoulder_z:.5f})")
@@ -344,9 +341,8 @@ def check_against_isaac(cfg, n):
     """Compare this file's FK against the simulator's own.
 
     The maths here comes from the **URDF**; the simulation runs the **USD**. They
-    are supposed to agree -- the USD was imported from that URDF -- but "supposed
-    to" is how a silent 20 mm bias survives into 200 recorded episodes. Drive the
-    articulation to random poses and compare the pinch point both ways.
+    are supposed to agree, and "supposed to" is how a silent bias survives into
+    200 recorded episodes. Worth re-running whenever either asset is regenerated.
     """
     sys.path.insert(0, str(SIM_DIR))
     import app
