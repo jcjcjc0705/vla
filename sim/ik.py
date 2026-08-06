@@ -53,7 +53,13 @@ class OMXKinematics:
     the EE frame is what makes ``ik(cube_position)`` mean what it says.
     """
 
-    def __init__(self, cfg: task_config.Config):
+    def __init__(self, cfg: task_config.Config, position_only: bool = False):
+        # position_only mimics MoveIt's `position_only_ik: True` -- the setting
+        # ROBOTIS ships for this arm: damped least squares on position alone,
+        # seeded from the current pose, orientation left to fall out. Provided so
+        # the two can be compared on success rate rather than argued about.
+        self.position_only = position_only
+        self._seed = np.zeros(5)
         urdf = ET.parse(cfg.robot_urdf).getroot()
         joints = {j.get("name"): j for j in urdf.findall("joint")}
 
@@ -150,6 +156,33 @@ class OMXKinematics:
         """
         return _rot("x", q5) @ self.tool_local
 
+    def _jacobian(self, q, eps=1e-6):
+        """3x5 position Jacobian of the tool point, by finite difference."""
+        p0 = self.fk(q)[0]
+        J = np.empty((3, 5))
+        for i in range(5):
+            dq = q.copy()
+            dq[i] += eps
+            J[:, i] = (self.fk(dq)[0] - p0) / eps
+        return J
+
+    def ik_position_only(self, target, seed=None, iters=200, damping=1e-3, tol=1e-5):
+        """Damped least squares on position alone, seeded -- KDL's behaviour.
+
+        Orientation is whatever falls out. The seed carries between calls, which
+        is what a solver driving a trajectory actually does.
+        """
+        q = np.asarray(self._seed if seed is None else seed, dtype=float).copy()
+        target = np.asarray(target, dtype=float)
+        for _ in range(iters):
+            err = target - self.fk(q)[0]
+            if np.linalg.norm(err) < tol:
+                self._seed = q.copy()
+                return q
+            J = self._jacobian(q)
+            q = q + J.T @ np.linalg.solve(J @ J.T + damping * np.eye(3), err)
+        return None
+
     def ik(self, target, cube_yaw=0.0, elbow="up", pitch=math.pi / 2, iters=4):
         """Joint angles putting the pinch point on ``target``, gripper pointing down.
 
@@ -159,6 +192,8 @@ class OMXKinematics:
 
         Returns ``None`` when the target is out of reach -- callers must check.
         """
+        if self.position_only:
+            return self.ik_position_only(target)
         target = np.asarray(target, dtype=float)
         rel = target - np.array([self.yaw_xy[0], self.yaw_xy[1], self.shoulder_z])
         R_h = math.hypot(rel[0], rel[1])

@@ -13,7 +13,7 @@ name: omx_vla
 
 services:
   vla:
-    image: registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image:latest
+    image: omx_bridge_image:moveit
     container_name: omx_vla
     network_mode: host
     ipc: host
