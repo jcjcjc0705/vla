@@ -418,21 +418,13 @@ def main(argv=None):
             print(f"  實測平均 {np.round(got, 5)}   設定的 grasp_offset {np.round(want, 5)}")
             print(f"  差異     {np.round((got - want) * 1000, 2)} mm"
                   f"   ±{np.round(se * 1000, 2)} 標準誤 (n={n})")
-            print("  ⚠️ 專家有注入 ±5mm 路徑點雜訊,單集殘差本來就會散;"
-                  "看的是平均與標準誤,不是單集。")
-            if np.abs(got - want).max() > 0.002:
-                print(f"  → 把 gripper.grasp_offset 改成 [{got[0]:.4f}, {got[1]:.4f}, {got[2]:.4f}]")
-
-        if lags:
-            L = np.array(lags) * 1000
-            print(f"\n夾合瞬間手臂落後命令: 平均 {L.mean():.1f}mm  最大 {L.max():.1f}mm"
-                  f"  (n={len(L)})")
-            print("  狀態機是用**命令**位置判定到達的,手臂還在追。夾合的 0.5 秒"
-                  "通常夠它追上 —— 落後夠大時就先在方塊上緣合起來。")
-
-        if client.place_retries:
-            print(f"\n方塊放置重試 {client.place_retries} 次 / {episodes} 集"
-                  f"   (寫入偶爾不生效,重試就過;不重試的話這些都是報廢的集數)")
+            print("  ⚠️ 這個量測能說什麼、不能說什麼:")
+            print("     y(開合方向)  有效 —— 手指會把方塊推到兩指中間")
+            print("     z(水平徑向)  **循環** —— 手指不約束這個方向,量到的等於設定的。")
+            print("                   實測設 -11/-4/-18 量回 -10.5/-3.6/-17.7。")
+            print("                   要定這個值只能看幾何(手指樞軸在 z=0)或看影像。")
+            print("     x(垂直)      約 -2.4mm 是預期的 —— convexHull 曲面手指閉合時")
+            print("                   會把方塊往上楔。補它只會讓手臂少下降、抓得更靠上緣。")
 
         rate = wins / max(episodes, 1)
         print(f"\n成功 {wins}/{episodes} = {rate * 100:.0f}%"
