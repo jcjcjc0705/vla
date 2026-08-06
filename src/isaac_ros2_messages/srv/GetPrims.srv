@@ -1,6 +1,0 @@
-string path
----
-string[] paths
-string[] types
-bool success
-string message
