@@ -46,8 +46,14 @@ ros:
   set_attribute_service: "/set_prim_attribute"
   # 相機影像。ROS2CameraHelper 發的是「render product」不是相機 prim,所以
   # 每台相機都要先有一個 IsaacCreateRenderProduct。
+  # ⚠️ 這裡是相機清單的**真相**:recorder / convert.py / eval.py / build_scene.py
+  # 都 iterate 這個 dict,不是各自寫死名字。加相機要同時在這裡與 `cameras:`
+  # 底下各加一筆,兩邊的 key 必須一致。
   camera_topics:
-    front: "/cam_front/rgb"
+    rear_right: "/cam_rear_right/rgb"
+    rear_left: "/cam_rear_left/rgb"
+    front_right: "/cam_front_right/rgb"
+    front_left: "/cam_front_left/rgb"
     wrist: "/cam_wrist/rgb"
   camera_frame_skip: 0           # >0 可以在算繪吃緊時降低發佈頻率
 
@@ -87,12 +93,41 @@ spawn:
   holdout_theta_deg: [[-35.0, -20.0], [20.0, 35.0]]
 
 # ── 相機 ────────────────────────────────────────────────────────────────
-# front 是主相機,內參對齊 D455,日後 sim2real 只要換影像來源。
-# wrist 掛在手臂上,錄起來備用 —— M5 會跑「只用 front」vs「兩台都用」的對照,
-# 決定 sim2real 值不值得買一台腕上相機。
+# 四台**環境相機**繞著工作區的四個象限,外加一台腕上相機。
+#
+# 命名照**相對基座的方位**,不是照用途:+x 是手臂正前方(θ=0),+y 是左、
+# -y 是右(右手座標系,+z 向上)。所以 rear_right 在基座的右後方,越過基座
+# 看向工作區。
+#
+# ⚠️ 舊名 `front` 已改為 `rear_right` —— 它一直都在右後方,那個名字是錯的,
+# 加進真正的前方相機之後會無法分辨。改名會讓先前錄的資料集少一個 key,
+# 但加相機本來就要重錄。
+#
+# 四台環境相機的幾何完全對稱:距離工作區中心都是 0.50 m、高度差都是 0.304 m、
+# 水平方位角 ±146.9°(後)與 ±33.1°(前)。`rear_right` 的位置是 M1 調出來的,
+# 其餘三台是它的鏡像 —— 所以四台的構圖尺度一致,M5 拿它們做對照才有意義。
+#
+# M5 的對照:2 台環境 vs 4 台環境,都再加腕上。⚠️ 真手臂上**沒有**腕上相機,
+# 所以那組對照決定要不要花錢買一台。
+#
+# ⚠️ **算繪解析度從 640×480 降到 320×240,跟 record_resolution 一致。**
+# 原本刻意用較高的算繪解析度「為了看」,但五台相機之後 Isaac 開始每約 8 分鐘
+# crash 一次,崩潰堆疊裡只有兩個模組:
+#
+#     omni.graph.action.RationalTimeSyncGate
+#     isaacsim.ros2.bridge.ROS2PublishImage
+#
+# 也就是五台相機的 ROS 發布擠過同一個時間同步閘,觸發 Isaac 內部的
+# `unlock() called by non-owning thread`。那是 Isaac 自己的 thread bug,改不了,
+# 只能縮短競爭窗口 —— 降解析度讓每次發布的像素量少 75%。
+#
+# **訓練資料完全不受影響**:recorder 本來就把影像降到 record_resolution,
+# 現在只是少做一次縮放。唯一的損失是 GUI 裡的相機畫面變小。
 cameras:
-  front:
-    resolution: [640, 480]
+  # 主相機:內參對齊 Intel RealSense D455(使用者有一台),日後 sim2real 只要
+  # 換影像來源。其餘三台環境相機是模擬專有的,真機不一定裝得起來。
+  rear_right:
+    resolution: [320, 240]
     horizontal_fov_deg: 90.0      # D455 彩色鏡頭約 90°×65°
     # TODO(M1): 用實測的 camera_info 換算精確內參
     #   ros2 topic echo /camera/camera/color/camera_info --once
@@ -104,8 +139,28 @@ cameras:
     eye: [-0.1227, -0.2170, 0.3337]
     target: [0.21, 0.0, 0.03]     # 工作區中心
     clipping: [0.02, 10.0]
+  rear_left:
+    resolution: [320, 240]
+    horizontal_fov_deg: 90.0
+    eye: [-0.1227, 0.2167, 0.3337]      # rear_right 的 y 鏡像
+    target: [0.21, 0.0, 0.03]
+    clipping: [0.02, 10.0]
+  front_right:
+    resolution: [320, 240]
+    horizontal_fov_deg: 90.0
+    # 在工作區前方往回看,x 遠超手臂最大伸展 0.397 m,所以不會被手臂遮擋,
+    # 也不會出現在其他相機的畫面裡。
+    eye: [0.5427, -0.2167, 0.3337]
+    target: [0.21, 0.0, 0.03]
+    clipping: [0.02, 10.0]
+  front_left:
+    resolution: [320, 240]
+    horizontal_fov_deg: 90.0
+    eye: [0.5427, 0.2167, 0.3337]
+    target: [0.21, 0.0, 0.03]
+    clipping: [0.02, 10.0]
   wrist:
-    resolution: [640, 480]
+    resolution: [320, 240]
     horizontal_fov_deg: 70.0
     parent: "/omx_f/link5"          # 夾爪底座,跟著手臂動(link6/7 是手指)
     # 以下都在 **link5 的座標系**(home 時與世界軸對齊,可以直接讀)。
@@ -117,6 +172,46 @@ cameras:
     clipping: [0.01, 5.0]
   # 資料集裡的影像尺寸(算繪解析度會降到這個大小再存)
   record_resolution: [320, 240]
+
+# ── 紋理 ────────────────────────────────────────────────────────────────
+# ⚠️ 沒有紋理的場景會讓純視覺的策略學不動,兩個獨立的原因:
+#
+#   1. 素色地板沒有地標。每一塊看起來都一樣,策略沒有任何視覺參考可以定位,
+#      只能從手臂自己的輪廓反推深度。
+#   2. 素色立方體在畫面上是**旋轉對稱**的。spawn.yaw_deg 把方塊 yaw 隨機化
+#      ±45°,但沒有表面細節時那個變化在像素上根本不存在 —— 兩集只差 yaw 會產生
+#      一模一樣的影像卻對應不同的專家動作。那是標註雜訊,而且不是多收資料就能解的。
+#
+# 兩張圖都由 sim/texture.py 程式生成(產物,gitignored),seed 記在這裡所以可重現。
+textures:
+  seed: 0
+  table:
+    # ⚠️ 這是**視覺用的**桌面,不是地板。真正的地板是 sublayer 帶進來的
+    # /Environment/ground,它 100 m 見方而 UV 只有 0~1 —— 貼圖上去的話 0.5 m
+    # 的工作區只會拿到約 5 個像素。物理仍然用那塊地板,這塊只給相機看。
+    size: 2.0                     # m,邊長。FOV 90° 在 0.5 m 處視野約 1 m,要蓋滿
+    center: [0.21, 0.0]           # 對齊工作區中心
+    lift: 0.0005                  # m,墊高避免與地板 z-fighting。必須是**正的**,
+                                  # 不然會被不透明的地板蓋住;方塊看起來陷入 0.5 mm,
+                                  # 對 25 mm 的方塊是 2%,看不出來,也不碰物理。
+    # ⚠️ 木紋不是為了好看,是為了**色相與飽和度**的分離。手臂與夾爪是灰色金屬,
+    # 灰色桌面讓兩者幾乎同色 —— 腕上相機最嚴重(夾爪佔畫面大半、背景同色,等於
+    # 要策略從灰色裡分出灰色)。色相差在陰影與曝光變化下都還在,明度差則不然。
+    #
+    # 三者在飽和度上是一道階梯,這才是主要的分離依據:
+    #   灰夾爪 S≈0.04  <  木紋 S≈0.39  <  紅方塊 S≈0.82
+    #
+    # ⚠️ 方塊在 320×240 下只有 8~12 px,顏色是找到它的主要線索。日後若方塊變得
+    # 難找,正確的調整是把木色**再降飽和**,不是調暗 —— 調暗只會加大明度差,而
+    # 明度會隨光照與陰影漂移,飽和度不會。
+    style: wood                   # wood | mottled(mottled 是灰色斑點版,留著備用)
+    wood_light: [0.74, 0.64, 0.48]
+    wood_dark: [0.55, 0.44, 0.31]
+    rings: 15.0                   # 年輪密度。2 m 桌面上約 15 道
+    distortion: 0.55              # 年輪被雜訊扭曲的程度 —— 太大會變成沙丘狀的大波浪,
+                                  # 真實木地板的紋路是細長略彎的,不是起伏
+    knots: 5                      # 節疤。大尺度、明顯不對稱的結構主要靠它
+    sharpness: 1.3                # 年輪暗線的銳利度。淺色木紋要柔和,值不能太高
 
 # ── 只在這個場景生效的物理覆寫 ───────────────────────────────────────────
 # 這些是 pick_cube.usd 裡的 override,**不會動到 omx_f.usd**。

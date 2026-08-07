@@ -317,6 +317,25 @@ a = torch.randn(4096, 4096, device="cuda"); (a @ a).sum().item()
 ### 3.9 場景數據
 
 Z-up、`metersPerUnit = 1.0`、地面在 z=0。
+
+> **2026-08-07 新增:程序性紋理(`sim/texture.py`)。** 素色場景對純視覺策略是兩個
+> 獨立的問題:素色地板沒有任何地標可以定位;素色立方體在畫面上**旋轉對稱**,
+> 所以 `spawn.yaw_deg ±45°` 的隨機化在像素上根本不存在 —— 兩集只差 yaw 會產生
+> 一模一樣的影像卻對應不同的專家動作,那是收再多資料也解不掉的標註雜訊。
+>
+> - **方塊改成 Mesh**(原本是 `UsdGeom.Cube`,procedural 幾何沒有 UV、貼不了圖),
+>   六個面各貼不同的不對稱圖案。⚠️ 物理不變:`boundingCube` 對 box 是**精確**近似,
+>   實測夾持殘差 `[-7.69,-0.34,2.56]` vs 改造前 `[-7.48,-0.53,2.19]`、俯仰角
+>   88.8~89.4° vs 88.6~89.6°、10/10。
+>   ⚠️ `subdivisionScheme` 一定要設 `none`,否則 renderer 套 Catmull-Clark
+>   把方塊變成球 —— **只在算繪端發生**,物理仍然像 box,所以每台相機看到球而
+>   數據完全正常。
+> - **桌面是新增的視覺用 quad**,不是地板。真正的地板 `/Environment/ground` 由
+>   sublayer 帶進來,100 m 見方而 UV 只有 0~1 —— 貼圖上去的話 0.5 m 的工作區只會
+>   拿到約 5 個像素。物理仍然用那塊地板,這塊只給相機看,墊高 0.5 mm 避免 z-fighting。
+>
+> 兩張圖都是 seed 驅動的產物(`assets/textures/`,gitignored),參數在 task yaml 的
+> `textures:` 底下。
 articulation root 是 `/omx_f/root_joint`(fixed base),但既有的
 `IsaacArticulationController` 用 `targetPrim=/omx_f` 且能運作,所以
 `SingleArticulation(prim_path="/omx_f")` 應該是對的 —— 第一次跑時用 `arm.dof_names` 確認。
@@ -403,19 +422,60 @@ LeRobot 一年內走過 v2 → v2.1 → v3.0,而 **GR00T 要的是 LeRobot v2 �
 影像在寫入前降到 `cameras.record_resolution`(320×240)。用算繪解析度存的話一集
 約 47 MB,200 集就是 9 GB 的、策略根本不會用到那個尺寸的像素。
 
-### 4.5 相機:錄兩台,訓練時再選
+### 4.5 相機:錄五台,訓練時再選
 
-- `cam_front` — 胸口高度的固定相機,**內參對齊 Intel RealSense D455**
-  (使用者有一台;換算工具在筆電的 `camera/cameracalibration/isaac_camera.py`,
-  公式是 `focal_length = fx × horizontal_aperture / image_width`,
-  diagonal aperture 預設 7.2 mm)。起點:`eye≈(0.75, −0.45, 0.55)`,
-  `target≈(0.21, 0, 0.03)`,算繪 640×480,資料集降到 320×240。
-- `cam_wrist` — 掛在 `/omx_f/link6`,朝夾爪前方。
+> **2026-08-07 更新:從兩台擴充到五台。** 原本寫「不需要額外的環境相機 —— 底座固定,
+> 幾何上等價」,那對**位置**成立,對**遮蔽與視差**不成立:單一視角下夾爪常常擋住方塊,
+> 而多視角是 VLA 訓練資料多樣性的主要來源。舊名 `front` 改為 `rear_right`(它一直都在
+> 右後方,加進真正的前方相機後那個名字會無法分辨)。
 
-**不需要額外的環境相機** —— 底座固定,「胸口相機」與「環境相機」幾何上等價。
+四台環境相機各據工作區的一個象限,幾何**完全對稱**:距離工作區中心都是 0.50 m、
+高度差 0.304 m、水平方位角 ±146.9°(後)與 ±33.1°(前)。加一台腕上相機。
 
-⚠️ 真手臂上**沒有**腕上相機。M5 必須跑「只用 front」vs「front + wrist」的對照,
-好讓使用者在花錢買腕上相機之前知道它值不值。
+| 名稱 | 位置(相對基座,+x 前 / +y 左) | 備註 |
+|---|---|---|
+| `rear_right` | 右後 | **主相機**,內參對齊 D455,位置是 M1 調出來的 |
+| `rear_left` | 左後 | `rear_right` 的 y 鏡像 |
+| `front_right` | 右前 | |
+| `front_left` | 左前 | |
+| `wrist` | `/omx_f/link5` | 朝夾爪前方 |
+
+D455 換算工具在筆電的 `camera/cameracalibration/isaac_camera.py`,公式是
+`focal_length = fx × horizontal_aperture / image_width`。
+
+⚠️ **算繪解析度是 320×240,跟 `record_resolution` 一致 —— 這是被 crash 逼出來的,
+不是效能考量。** 原本算繪 640×480「為了看」,但擴充到五台相機之後 Isaac 開始
+**每約 8 分鐘 crash 一次**:
+
+```
+assertion failed: 'm_owner == pthread_self()'
+  in carb::thread::detail::BaseMutex<false>::unlock()
+  "unlock() called by non-owning thread"
+
+崩潰堆疊裡只有兩個模組:
+  omni.graph.action.RationalTimeSyncGate
+  isaacsim.ros2.bridge.ROS2PublishImage
+```
+
+五台相機的 ROS 發布擠過同一個時間同步閘,觸發 Isaac 內部的執行緒錯誤。**那是
+Isaac 自己的 bug,不是場景資料或紋理的問題**(那類問題會是 parse error 或幾何遺失,
+不會是 mutex assertion)。只能縮短競爭窗口 —— 降解析度讓每次發布少 75% 的像素。
+
+**訓練資料不受影響**:recorder 本來就降到 `record_resolution`,現在只是少做一次縮放。
+⚠️ 如果日後還會 crash,下一個旋鈕是 `ros.camera_frame_skip`(代價是影像速率減半,
+會低於 30 Hz 控制迴圈),再不行就要幫 M4 寫「crash 自動重啟並續錄」——
+recorder 是逐集寫檔的,所以已錄的集不會丟。
+
+**實測(五台同時)**:71 Hz wall / **29.6 Hz 模擬時間**(控制迴圈 30 Hz),
+唯一影像/幀 0.854~0.921 —— 跟兩台時的 0.865 相當,**加三台沒有讓影像變舊**。
+每集資料量約 40 MB,200 集約 8 GB。
+
+⚠️ **`ros.camera_topics` 是相機清單的真相。** `build_scene.py`、`recorder.py`、
+`convert.py`、`eval.py` 全部 iterate 它,沒有一支寫死相機名字。加相機要在那裡與
+`cameras:` 底下各加一筆,key 必須一致。
+
+⚠️ 真手臂上**沒有**腕上相機,而且四台環境相機也不見得裝得起來。M5 的對照是
+「2 台環境」vs「4 台環境」,都再加腕上,好讓使用者知道多花的錢值不值。
 
 ROS 相機發布**現在就在用**(錄製就靠它)。headless 正確的接法:
 ```

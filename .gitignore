@@ -17,3 +17,6 @@ __pycache__/
 .venv/
 ml-env/
 __pycache__/
+
+# build_scene.py 產生的程序性紋理 —— 產物,seed 在 task yaml 裡
+assets/textures/
