@@ -68,10 +68,12 @@ class ExpertClient(Node):
                               ros["set_attribute_service"])
 
         self._q = None
+        self._sim_t = None                     # the twin's clock -- see wait_sim
         self._cube = None                      # (position, yaw)
         self._frames_seen = set()
         self._warned_yaw = False
         self.place_retries = 0
+        self.loop_overruns = 0                 # ticks that outran the sim clock
         self._mimic = None
 
         self._cmd = self.create_publisher(JointState, "/sync/command", 10)
@@ -91,6 +93,11 @@ class ExpertClient(Node):
 
     # ── incoming ───────────────────────────────────────────────────────
     def _on_state(self, msg):
+        # The twin's own clock. /joint_states is published from the scene's
+        # on_playback_tick and stamped by isaac_read_simulation_time, so this
+        # advances once per simulation tick -- see wait_sim for why the control
+        # loop runs on it instead of on wall clock.
+        self._sim_t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         got = {}
         for name, pos in zip(msg.name, msg.position):
             joint = self._canonical_of.get(name)
@@ -169,6 +176,57 @@ class ExpertClient(Node):
         if not ok and self._frames_seen:
             print(f"          該 topic 上看到的 frame:{sorted(self._frames_seen)}")
         return ok
+
+    def wait_sim(self, dt, timeout=5.0):
+        """Block until the **simulation** clock has advanced by ``dt`` seconds.
+
+        This is the control loop's pacing, and wall clock cannot do the job.
+
+        ⚠️ **Isaac's run loop is not rate-limited under headless streaming.**
+        Measured on the RTX Pro 6000: the simulation advances 2.42 s per second
+        of wall clock. ``rateLimitEnabled``, ``rateLimitFrequency``,
+        ``useFixedTimeStepping`` and ``useFastMode`` were all passed on the
+        command line and all had **no effect** -- headless has no swapchain
+        present for the limiter to hang off. The laptop never showed this
+        because an RTX 2060 rendering two cameras is itself the limiter, which
+        lands it near 1.0x by accident.
+
+        With ``time.sleep(1/30)`` the loop therefore issued one command per
+        **80 ms of simulated time** instead of 33 ms. That is not a small
+        timing error -- it moves the seed that position-only IK is decided by
+        (§5: the null space has 2 DOF and no selection criterion), and the grasp
+        pitch drifts out of the range where a 5-DOF arm has a solution at all:
+
+            laptop   20/20, pitch 32-44°
+            here     11/20, pitch -12..72° (mean 13°), 9 episodes "抓取點無解"
+
+        Waiting on the twin's clock instead makes the loop rate correct on any
+        machine, which is also what lets the laptop's human demonstrations (M8)
+        be merged into the same dataset as this machine's.
+
+        Returns False if the clock stopped advancing -- paused, or Isaac gone --
+        rather than hanging the episode forever.
+        """
+        start = self._sim_t
+        if start is None:
+            # No state yet. The caller is inside wait_for_joints' territory;
+            # fall back rather than spin forever on a clock that is not running.
+            time.sleep(dt)
+            return False
+        if (self._sim_t - start) >= dt:
+            # The tick's own work (IK, mostly) already took longer than a
+            # control period of simulated time, so there is nothing to wait for
+            # and the loop is running at whatever rate the solver allows. That
+            # is the wall-clock failure mode again, arrived at from the other
+            # side, and it is silent unless counted -- the run summary prints it.
+            self.loop_overruns += 1
+            return True
+        deadline = time.monotonic() + timeout
+        while (self._sim_t - start) < dt:
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.0005)
+        return True
 
     # ── outgoing ───────────────────────────────────────────────────────
     def joints(self):
@@ -307,6 +365,22 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
         return False, FAILED, 0, None, float('nan'), (float('nan'),) * 3
 
     at, at_yaw = client.cube()
+    # Reseed before planning, for the same reason the loop below reseeds every
+    # tick (§5: the null space has 2 DOF and no selection criterion, so the
+    # answer is decided almost entirely by the seed).
+    #
+    # ⚠️ ``expert.reset`` solves IK for the grasp point, and without this line
+    # the seed is still whatever the **previous episode's last tick** left --
+    # the arm up in the air holding a cube. A bad ending then poisons the next
+    # episode's plan; that episode never enters the loop, so the seed is never
+    # refreshed, and the same stale seed fails again. The failures come in
+    # blocks, not singly: episodes 14-16 of a 20-episode run went down together
+    # behind one anomalous episode 13, and 9 in a row before the loop was fixed.
+    #
+    # The arm is at home by this point, so seeding from the measurement also
+    # makes each episode's plan independent of how the last one ended.
+    if hasattr(kin, "seed"):
+        kin.seed = client.joints()[:5]
     if not expert.reset(client.joints(), at, at_yaw):
         print(f"      ✗ 規劃不了:{expert.reject_reason}"
               f"   (要求放在 {np.round(pos, 4)})")
@@ -353,7 +427,10 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
         client.send(targets)
         if rec is not None:
             rec.frame(state, targets, client.frames(), time.time())
-        time.sleep(period)
+        # The twin's clock, not the wall's -- see ExpertClient.wait_sim. On a
+        # machine where the simulation outruns real time, sleeping here is what
+        # silently turned 20/20 into 11/20.
+        client.wait_sim(period)
         if expert.phase in (LIFT, HOLD):
             cube = client.cube()[0]
             q = client.joints()
@@ -498,6 +575,13 @@ def main(argv=None, record=False):
             print(f"夾合瞬間手臂落後命令(mm):平均 {L.mean():.1f}  最大 {L.max():.1f}")
         if client.place_retries:
             print(f"方塊放置重試 {client.place_retries} 次 / {episodes} 集")
+        if client.loop_overruns:
+            # Not cosmetic: every overrun tick is one where the arm advanced
+            # further than a control period, which is exactly what wait_sim
+            # exists to prevent. A handful at phase changes is fine; a large
+            # fraction means the solver, not the clock, is now setting the rate.
+            print(f"⚠️ 控制迴圈追不上模擬的 tick 數:{client.loop_overruns}"
+                  f" —— 這些 tick 前進得比一個控制週期多,IK 種子會漂")
 
         if rec is not None:
             print(rec.summary())
