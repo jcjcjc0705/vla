@@ -1,0 +1,50 @@
+# 控制層容器 —— 需要 **MoveIt** 的時候用這個,其餘一律用 docker-compose-vla.yml。
+#
+# ⚠️ 為什麼要有兩個容器:**MoveIt 與 lerobot 無法共存於同一個 python 環境。**
+#
+#   lerobot 0.6.x 硬性要求 numpy>=2.0,<2.3
+#   moveit_py 是 C++ binding,而 numpy 2.0 破壞了 C ABI
+#
+# 實測(2026-08-07,伺服器):在 numpy 2.2.6 之下 `ros2 run omx_vla_app expert`
+# (預設 ik:=moveit)會 **Segmentation fault**;把 apt 的 numpy 1.26.4 放回 sys.path
+# 最前面之後,同一個指令正常跑完。⚠️ import 完全正常,執行時才掛,而且沒有任何訊息 ——
+# 所以這條界線用兩個 image 畫死,不靠執行時記得設 PYTHONPATH。
+#
+#   docker-compose-vla.yml    omx_vla_image      numpy 2.x + torch + lerobot
+#                                                轉檔 / 訓練 / 推論 / ik:=analytic
+#   docker-compose-ctrl.yml   omx_bridge_image   numpy 1.x + MoveIt
+#                             (這一份)            ik:=moveit、jog、ik_target、monitor
+#
+# ⚠️ 兩個容器可以並存,但**一次只能有一個行程發 /sync/command**。跑之前:
+#     docker exec omx_vla      pgrep -f omx_vla_app
+#     docker exec omx_vla_ctrl pgrep -f omx_vla_app
+#
+# 用法(跟 vla.sh 一樣,只是換一份 compose):
+#     bash docker/scripts/ctrl.sh
+#     r                                                    # 第一次要 build
+#     ros2 run omx_vla_app expert --ros-args -p episodes:=20   # 預設 ik:=moveit
+#     ros2 run omx_bridge_app jog sim
+
+name: omx_vla_ctrl
+
+services:
+  ctrl:
+    # 刻意**不是** omx_vla_image:這一層要的正是它沒有的 numpy 1.x。
+    image: registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image:latest
+    container_name: omx_vla_ctrl
+    network_mode: host
+    ipc: host
+    environment:
+      # 必須跟 Isaac 啟動時的值一致,否則兩邊看不見對方的 topic,
+      # 症狀跟場景壞掉一模一樣。
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
+      - FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+      - VLA_ROOT=/vla
+    volumes:
+      - ../..:/vla
+      - ../../src/omx_vla_app:/workspaces/src/omx_vla_app
+    command: sleep infinity
+    stdin_open: true
+    tty: true
+    # 沒有 GPU reservation,而且不需要:Isaac 原生跑在 host,MoveIt 是 CPU 求解。
+    # 學習層那份才要 GPU。
