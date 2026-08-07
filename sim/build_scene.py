@@ -7,9 +7,15 @@ the same machine.
 
 Two rules this file exists to enforce:
 
-* ``omx_f.usd`` is **never modified**. It is part of the sim<->real calibration
-  chain that ``jog`` / ``to_sim`` / ``to_real`` depend on. Everything here is an
-  override layered on top of it.
+* ``omx_f.usd`` is **never modified from here**. It is part of the sim<->real
+  calibration chain that ``jog`` / ``to_sim`` / ``to_real`` depend on, and it is
+  owned by the omx_bridge_image repo -- which does change it (0.2.0 added a
+  hidden ``/ik_target`` prim, a TF publisher and a ``ROS2ServicePrim``). What is
+  authored here is only ever an override layered on top.
+
+  One consequence to keep in mind: this scene **inherits** those additions, so
+  ``add_cube_tf_nodes`` skips the ``ROS2ServicePrim`` when the sublayer already
+  supplies one. Two of them advertise the same four service names.
 * It is brought in as a **sublayer, not a reference**. ``omx_f.usd`` is a
   flattened stage whose root layer holds the ``Flattened_Prototype_*`` specs that
   ``link6/collisions`` points at. A reference to the default prim leaves those

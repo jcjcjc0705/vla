@@ -32,12 +32,12 @@
 
 **伺服器環境(已實測)**:Ubuntu 24.04.4 LTS、系統內建 Python 3.12.3、
 driver 580.159.03(支援到 CUDA 13.0)、GPU 97,887 MiB。
-工作目錄 `~/omx_vla/`,兩個 repo 已 clone 完成。
+工作目錄 `~/omx_vla/`。§2 列出要準備的東西。
 
 **`docker run --gpus all` 可用** —— nvidia-container-toolkit 已設好,不需要 sudo。
 所以 **ML 那一層跑在容器裡**(符合使用者既有的 image + compose + `utils.sh` 做法),
 **Isaac 留在原生**(搬進容器要處理 Vulkan/RTX/串流埠,是另一個工程,而且原生現在就能跑)。
-兩者用 §4.4 的 zmq 邊界溝通,容器加 `--network host` 即可。
+兩者靠 ROS 2 溝通(§4.3),容器加 `--network host` 與相同的 `ROS_DOMAIN_ID` 即可。
 
 ⚠️ **GPU 是共用的**,同機器上其他使用者可能在跑 Isaac(觀察到約 5.5 GB / 22% 佔用)。
 還有約 92 GB 可用,GR00T 微調建議 40 GB,可以並存,不必等對方。
@@ -59,37 +59,59 @@ driver 580.159.03(支援到 CUDA 13.0)、GPU 97,887 MiB。
 
 ---
 
-## 2. 先 clone
+## 2. 要準備的東西
+
+**兩個行程,一條 ROS。** Isaac 原生跑在 host 上(它要 GPU、RTX、WebRTC);所有控制
+程式跑在 `omx_bridge_image` 容器裡(它要 rclpy、MoveIt)。兩者靠 ROS 2 Jazzy 上的
+topic / service 溝通,`ROS_DOMAIN_ID` 一致即可。§4.3 說明為什麼是這個形狀。
 
 ```bash
-# 機器人資料層 — USD 場景、URDF+meshes、profile
+# 1. 這個 repo
+git clone https://github.com/jcjcjc0705/vla.git
+
+# 2. 機器人資料層 —— 原生 Isaac 要 host 上的 USD/URDF 檔案
 git clone https://gitlab.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image.git
+#    沒 clone 也行,直接從 image 取出來:
+#    docker run --rm -v "$PWD:/out" \
+#      registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image:latest cp -r /assets /out
 
-# 同步引擎 — 只需要其中的 sim_real_bridge/profile.py
-git clone ssh://git@gitlab.screamtrumpet.csie.ncku.edu.tw:722/pochun/sim_real_bridge_image.git
-# 沒有 SSH key 就改 HTTPS:
-# git clone https://gitlab.screamtrumpet.csie.ncku.edu.tw/pochun/sim_real_bridge_image.git
+# 3. 同步引擎 —— **host 端**的 Isaac 腳本要它才知道關節順序
+git clone https://gitlab.screamtrumpet.csie.ncku.edu.tw/pochun/sim_real_bridge_image.git
+
+# 4. 控制層的 image(引擎、profile、jog、MoveIt、Isaac prim 服務介面全在裡面)
+docker pull registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image:latest
 ```
 
-| 檔案 | 用途 |
+| 東西 | 用途 |
 |---|---|
-| `omx_bridge_image/assets/omx_f.usd` | Isaac 場景(8.2 MB,已 flatten) |
-| `omx_bridge_image/assets/omx_f/omx_f.urdf` + `meshes/` | Lula IK 的輸入 |
-| `omx_bridge_image/profile/omx_f.profile.yaml` | 關節名稱與順序 |
-| `sim_real_bridge_image/bridge/sim_real_bridge/profile.py` | 純 Python + yaml,**無 ROS 相依** |
+| `omx_bridge_image/assets/omx_f.usd` | Isaac 場景(8.2 MB,已 flatten)。**host 上要有**,Isaac 原生讀它 |
+| `omx_bridge_image/assets/omx_f/omx_f.urdf` + `meshes/` | `sim/ik.py` 讀幾何,MoveIt 也用同一份的絕對路徑版本 |
+| `sim_real_bridge_image/bridge/` | `profile.py` —— 純 Python + yaml,無 ROS 相依。**只有 host 端需要** |
+| `omx_bridge_image` image | 容器裡的一切:`sim_real_bridge` 引擎、profile、`jog`、`ik_target`、`moveit_kin`、`isaac_prim` |
 
-**不要抄一份 `profile.py`**,加進 `PYTHONPATH`。全鏈只能有一份關節順序的真相:
+**不要抄一份 `profile.py`。** 全鏈只能有一份關節順序的真相。`sim/task_config.py`
+自己會找對地方 —— 容器裡 import 已安裝的 ROS 套件,host 上沿
+`task/pick_cube.task.yaml` 的 `paths.sim_real_bridge` candidates 找 checkout。
+兩條路指向同一份檔案的兩個副本,內容必須一致,所以**兩個都跟著 tag 走,不要各自改**。
+
+驗證兩邊都通:
 
 ```bash
-export PYTHONPATH="$PWD/sim_real_bridge_image/bridge:$PYTHONPATH"
-python -c "from sim_real_bridge.profile import load_profile; \
-  print(load_profile('omx_bridge_image/profile/omx_f.profile.yaml').joints)"
+# 容器裡
+bash docker/scripts/vla.sh                 # 進 shell(compose 掛 vla/ 進 /vla)
+r                                          # 第一次要 build
+python3 -c "from sim_real_bridge.profile import load_profile; \
+  print(load_profile('/profile/omx_f.profile.yaml').joints)"
 # 期待: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'gripper_joint_1']
+
+# host 上,用 Isaac 的直譯器 —— 印出它解析到的每一條路徑
+bash sim/isaac_python.sh sim/task_config.py
 ```
 
-這行同時驗證了 clone 成功、以及 `profile.py` 在 Isaac 的 Python 3.11 下 import 得起來。
+⚠️ host 上跑的話,`sim_real_bridge` 要沿 `paths.sim_real_bridge` 找得到 checkout。
+找不到時 `task_config` 會直接說是哪一條路徑失敗。
 
-`omx_arm_image`(真臂驅動)**不需要**。
+`omx_arm_image`(真臂驅動)**不需要**,這台機器沒有真手臂。
 
 ---
 
@@ -116,10 +138,19 @@ stage.SetDefaultPrim(stage.GetPrimAtPath("/omx_f"))
 
 驗證:composed stage 的 prim 數要跟原本一致(原本 traverse 約 235 個 prim)。
 
-### 3.2 **絕對不要修改 `omx_f.usd`**
+### 3.2 **從這個 repo 不要修改 `omx_f.usd`**
 
-它是 sim↔real 校正鏈的一部分,使用者的 `jog` / `to_sim` / `to_real` 工具都依賴它。
-所有場景增修都寫成 `pick_cube.usd` 裡的 override。
+它是 sim↔real 校正鏈的一部分,使用者的 `jog` / `to_sim` / `to_real` 都依賴它。
+所有任務增修都寫成 `pick_cube.usd` 裡的 override。
+
+它**不是**永遠不變的檔案 —— `omx_bridge_image` 0.2.0 在它自己的 repo 裡加了
+`/ik_target`(隱藏的除錯用目標方塊)、一個 TF 發佈節點,以及 `ROS2ServicePrim`。
+兩件事因此成立:
+
+- **`pick_cube.usd` 會繼承那三樣**,所以 `build_scene.py` 不再自己加
+  `ROS2ServicePrim` —— 兩個節點會搶同一組服務名。
+- 要動 `omx_f.usd` 就去 `omx_bridge_image` 那個 repo 動、發 tag、重出 image。
+  不要從 `vla/` 這邊改。
 
 ### 3.3 夾爪力量偏弱 —— 是**參數問題**,不是風險
 
@@ -145,8 +176,20 @@ stiffness 625 → ~5000(damping 隨之 ~100)。
 且只有 **3–6%** 的頂點貼在最外側的兩個面上。所以凸包**不會**保留出平整的夾持面。
 
 這是唯一一個「把方塊變輕」解決不了的項目——接觸幾何不好時,方塊會從指間滑掉或轉出去,
-跟重量無關。解法依序試:`convexHull` → `convexDecomposition`;仍是圓角就在
-`link6`/`link7` 底下各加一片薄的 `FixedCuboid` 當夾持墊(~5 行,常見且正當的做法)。
+跟重量無關。
+
+> **實測結論:留在 `convexHull`,不要換。** 兩種都試過了,理由寫在
+> `task/pick_cube.task.yaml` 的 `overrides.finger_colliders` 註解裡,摘要:
+>
+> - **兩者都是過度近似**,凸塊的聯集必然 ⊇ 原始網格,分解只是換個地方胖。
+>   夾得很穩的時候兩側**都**看得到縫 —— 那是 collider 比視覺網格胖的顯示落差,
+>   不是沒接觸。
+> - **功能上等價**:analytic 與 moveit 兩種解算器下都是 20/20。
+> - 分解讓相機從 12.0 掉到 9.4 Hz,而且**視覺判讀失效**(凸塊比網格胖又不被算繪)。
+>   這一段開發裡用眼睛看是最有效的診斷管道。
+>
+> 接觸幾何若真的變成瓶頸,下一步是 `overrides.pads`(明確給一個平整夾持面),
+> **不是換近似方式**。
 
 ### 3.5 `gripper_joint_2` 的 mimic 剛度 —— **M1 唯一真正的障礙,已解決**
 
@@ -171,7 +214,9 @@ stiffness 625 → ~5000(damping 隨之 ~100)。
 `dampingRatio = 0.8`。
 
 URDF 註解說它「visual only」,那句是針對 ros2_control 而言。**在 USD 裡它是物理耦合的、
-會實際參與夾取。** 但它是軟彈簧,受力時被動指會落後,可能造成單邊夾持而滑脫 —— M1 要觀察。
+會實際參與夾取。** 原廠是軟彈簧,受力時被動指會落後、造成單邊夾持而滑脫 —— 已由 §3.5
+的 `naturalFrequency` 25 → 1000 解決。`expert_node` 每一集都會回報這個誤差
+(`mimic_error()`),它變大就是被動指又跟不上了。
 
 它佔一個真實的 articulation DOF,所以 `/joint_states` 會發 **7** 個名字,不是 6 個。
 
@@ -185,9 +230,21 @@ world bbox 相接。`gripper_joint_1` 軸是 +Z、`link6` 在 +y 側,所以**正
 
 - **Isaac Sim 5.1 = CPython 3.11**(`kit/python/bin/python3.11`,extscache 都是 `cp311`)
 - **LeRobot ≥ 0.6 要求 Python ≥ 3.12**
-- `rclpy` 也不能從 Isaac 的 python 匯入(Humble 是 3.10、Jazzy 是 3.12)
+- `rclpy` 也不能從 Isaac 的 python 匯入(Jazzy 是 3.12)
 
-**所以 torch / lerobot 裝不進 Isaac 的直譯器。強制雙行程。**
+**所以 torch / lerobot / rclpy 都裝不進 Isaac 的直譯器。強制多行程。**
+
+實際切出來的行程長這樣:
+
+| 行程 | Python | 跑什麼 |
+|---|---|---|
+| Isaac(host 原生) | 3.11 | 模擬。ActionGraph 收發 ROS,見 §4.2 |
+| `omx_bridge_image` 容器 | 3.12(Jazzy) | 專家、錄製、`jog`、`ik_target` —— 全部用 rclpy |
+| ML 容器 / venv | 3.12 | torch + lerobot,訓練與轉檔 |
+
+**Isaac 與控制層之間的界線是 ROS,不是自己寫的 RPC。** Isaac 的 ROS 2 bridge 本來
+就用 Jazzy(用 `omx_bridge_image/scripts/isaac.sh` 起 Isaac,它會強制用 Isaac 自帶的
+jazzy bundle),所以兩邊講同一套訊息,不需要橋接層。
 
 **不要**為了統一而升級到 Isaac Sim 6.0。這在動工前評估過了,見 §9 第 7 條。
 另外注意:**就算 Python 版本一致,把訓練堆疊裝進 Isaac 的直譯器仍然是壞主意**
@@ -248,61 +305,72 @@ EE 在 home 的位置 `(0.3129, −0.0016, 0.2107)`;肩部在 `(−0.011, 0, 0.0
 - **但由上而下抓取時限制消失**:俯仰 90° 朝下時,`joint5` 的滾轉軸剛好垂直,它**就變成**
   夾爪繞垂直軸的偏航。任意 `(x, y)`、任意方塊朝向的垂直夾取完全可行。
 
-**把任務限定為由上而下抓取。** 不要要求手臂做不到的姿態 —— Lula 會回 `succ=False`,
+**把任務限定為由上而下抓取。** 不要要求手臂做不到的姿態 —— 解算器會回 `None`,
 或更糟,回一個看似合理的錯姿態。
 
 ---
 
 ## 4. 架構決策(照做,別重新發明)
 
-### 4.1 原生 Isaac standalone,不引入 Isaac Lab
+### 4.1 原生 Isaac,不引入 Isaac Lab
 
-NVIDIA 的 LeIsaac 綁 Isaac Lab 2.1 + Isaac Sim 4.5/5.0,這裡是 5.1.0。
-Isaac 已內建需要的每一塊:
+NVIDIA 的 LeIsaac 綁 Isaac Lab 2.1 + Isaac Sim 4.5/5.0,這裡是 5.1.0。借它的想法,
+不用它的程式碼。
 
-| 元件 | 位置 |
+⚠️ **Isaac 內建的 `PickPlaceController` / Lula IK / `ArticulationKinematicsSolver` /
+`ParallelGripper` 一個都沒用到**,不要再去接它們 —— 它們都住在 Isaac 的直譯器裡,
+而現在控制程式在容器裡。運動學見 §5。
+
+headless 串流:配方在
+`standalone_examples/api/isaacsim.simulation_app/livestream.py`。使用者的 AppImage
+連得上,M0 已驗證。
+
+### 4.2 Isaac 端用 ActionGraph,控制流在容器裡
+
+**Isaac 不跑任何自己寫的控制邏輯。** 它的 ActionGraph 只做四件事,全是 stock 節點:
+
+| 節點 | 作用 |
 |---|---|
-| `PickPlaceController`(通用十階段抓放狀態機) | `isaacsim.robot.manipulators.controllers` |
-| Lula IK 0.10.1 | `isaacsim.robot_motion.lula` |
-| `ArticulationKinematicsSolver` | `isaacsim.robot_motion.motion_generation` |
-| `ParallelGripper` | `isaacsim.robot.manipulators.grippers` |
+| `ROS2PublishJointState` / `ROS2SubscribeJointState` | `/joint_states` 出、`/joint_command` 進 |
+| `ROS2PublishTransformTree` | 方塊(與 `/ik_target`)的位姿走 TF 出來 |
+| `ROS2ServicePrim` | 從外面讀寫 prim 屬性 —— 這是**放置方塊**唯一的路 |
+| `IsaacCreateRenderProduct` + `ROS2CameraHelper` | 兩台相機的影像 |
 
-headless 也看得到:配方在
-`standalone_examples/api/isaacsim.simulation_app/livestream.py` —
-`SimulationApp({"headless": True, ...})` + `enable_extension("omni.services.livestream.nvcf")`。
-使用者的 AppImage 連得上。
+回合重置、方塊隨機化、成功判定、狀態機全部在容器裡的 Python,透過上面那四樣操作
+Isaac。**你手動開 Isaac、載場景、按 Play,然後在容器裡 `ros2 run`** —— Isaac 那邊
+不需要 standalone script。
 
-### 4.2 GUI ActionGraph 不夠用,用 standalone Python
+### 4.3 一切都走 ROS
 
-回合重置、方塊隨機化、成功判定都是 Python 控制流。用 OmniGraph 表達它們需要自訂 OGN
-節點或 `ScriptNode` —— 嚴格來說更多工、更難除錯。而且伺服器是 headless 的,
-透過 WebRTC 做 GUI 編輯很痛苦。
+錄製、專家、鍵盤控制,全部經由 `/sync/command` → `sync_node` → `/joint_command`。
 
-### 4.3 錄資料**不經過 ROS**
+> ⚠️ **這推翻了本文件早期版本的 §4.3。** 那時寫的是「錄資料不經過 ROS,直接在 Isaac
+> 行程內驅動 articulation」,理由是時間對齊。實際做下去換掉它的原因是:
+>
+> - **reset 不必在 Isaac 端做。** `ROS2ServicePrim` 的 `set_prim_attribute` 可以從
+>   外面寫 `xformOp:translate`,方塊真的會動(實測過)。這是原本判斷「純 ROS 不存在」
+>   的那個前提,而它是錯的。
+> - **行程內的路要 rclpy 才能跟 bridge 共用**,而 rclpy 進不了 Isaac 的 3.11。走
+>   ROS 之後 `jog`、專家、未來的 policy 全部共用同一條命令路徑,M7 不再是一個階段。
+> - **時間對齊改用記錄而不是保證**:`state` 與 `action` 取自控制迴圈的同一次迭代,
+>   所以 `action[t]` 確實是 `state[t]` 當下發出的命令。影像做不到 —— 它們以算繪的
+>   步調自己到達 —— 所以每一幀記下**當時用的是哪張影像、那張多舊**,由轉檔器決定
+>   怎麼處理過期影像。假裝同時發生比記下延遲更糟。
 
-直接在 Isaac 行程內驅動 articulation。理由是**時間對齊**:寫 action → `world.step()`
-→ 讀 observation,`action[t]` 真的就是施加在 `state[t]` 的動作。
-
-走 ROS 的話:`sync_node` 的固定 50 Hz 重發會把動作邊緣抹成階梯、影像與關節狀態在不同
-時鐘上——等於教模型去擬合 DDS 抖動。而且 **reset 本來就只能在 Isaac 端做**,
-「純 ROS」這個選項並不存在。
-
-**但 seam 要保在 schema 層**:錄下的 `action` 就是合法的 `/sync/command` payload
-(同樣 6 個關節名、同順序、弧度、USD 座標)。這靠 import `sim_real_bridge.profile`
-取關節順序來機械性地保證。M7 再把 ROS 接回來。
+⚠️ 影像的 `header.stamp` 是 Isaac 的**模擬時間**,跟控制迴圈的時鐘不是同一個。
+拿兩者相減會得到十億秒等級的數字。用**到達的 wall time**,`recorder.py` 就是這樣做的。
 
 ### 4.4 原始傾印 → 轉檔,不要直接寫 LeRobot
 
-Isaac(3.11)寫 `data/raw/ep_XXXXX/{frames.npz, img_*.png, meta.json}`;
-轉檔器(3.12 venv)產生 dataset。
+`recorder.py` 寫 `data/raw/ep_XXXXX/{frames.npz, img_*.png, meta.json}`;
+轉檔器(3.12)產生 dataset。
 
-被 Python 版本差**強制**,但本來就是更好的設計:LeRobot 一年內走過 v2 → v2.1 → v3.0,
-而 **GR00T 要的是 LeRobot v2 變體 + `meta/modality.json`**,ACT 走 v3.0。
-留一份格式無關的原始傾印,換格式是重跑 `convert.py`,不是重錄 200 集。
+LeRobot 一年內走過 v2 → v2.1 → v3.0,而 **GR00T 要的是 LeRobot v2 變體 +
+`meta/modality.json`**,ACT 走 v3.0。留一份格式無關的原始傾印,換格式是重跑
+`convert.py`,不是重錄 200 集。
 
-3.11/3.12 的界線只由**一個 ~40 行的 zmq request/reply** 跨越,送 `{image, state}`
-回 `action`。**不要在這裡耍聰明**(ONNX 匯出可行但麻煩且無益——sim 時間你控制得了,
-延遲無所謂)。這個界線在 M7 會被 ROS topic 對重新實作,兩者形狀相同。
+影像在寫入前降到 `cameras.record_resolution`(320×240)。用算繪解析度存的話一集
+約 47 MB,200 集就是 9 GB 的、策略根本不會用到那個尺寸的像素。
 
 ### 4.5 相機:錄兩台,訓練時再選
 
@@ -318,88 +386,70 @@ Isaac(3.11)寫 `data/raw/ep_XXXXX/{frames.npz, img_*.png, meta.json}`;
 ⚠️ 真手臂上**沒有**腕上相機。M5 必須跑「只用 front」vs「front + wrist」的對照,
 好讓使用者在花錢買腕上相機之前知道它值不值。
 
-ROS 相機發布(**M7 才需要**,錄製不用)——headless 正確的接法:
+ROS 相機發布**現在就在用**(錄製就靠它)。headless 正確的接法:
 ```
 OnPlaybackTick -> IsaacCreateRenderProduct(cameraPrim, w, h) -> ROS2CameraHelper(type="rgb")
 ```
 用 `isaacsim.core.nodes.IsaacCreateRenderProduct`,**不要**用
 `IsaacCreateViewport`/`IsaacGetViewportRenderProduct`(那需要 headless 下不存在的
-viewport)。範例:`standalone_examples/testing/isaacsim.ros2.bridge/test_camera_tf_delay.py`。
-把它放在 `/World/task/CameraGraph`,**不要**動 `/omx_f/ActionGraph`。
+viewport)。`build_scene.py` 的 `add_camera_nodes()` 已經是這個形狀。
+
+⚠️ **筆電上相機只發得出約 12 Hz,而控制迴圈是 30 Hz** —— 大約每兩幀重複一次像素。
+`recorder.py` 把每一幀用的影像索引與**當時的影像年齡**都記下來了,轉檔器要決定怎麼
+處理。這台機器算繪快得多,先量再決定:`meta.json` 裡的 `image_age_s`。
 
 ---
 
-## 5. 關鍵 API(已查證簽章)
+## 5. 運動學:兩個解算器,不是 Lula
+
+⚠️ **Lula 從沒用過,也不要再去試。** 它住在 Isaac 的直譯器裡,而控制程式在容器裡。
+`omx_f_descriptor.yaml` 不存在,也不需要。實際有兩個可互換的解算器:
+
+| 解算器 | 在哪 | 用途 |
+|---|---|---|
+| **MoveIt**(主力) | image 裡的 `omx_bridge_app.moveit_kin.MoveItKin` | ROBOTIS 官方的 `moveit/` 設定,KDL plugin |
+| **解析解**(對照) | `sim/ik.py` 的 `OMXKinematics` | 閉式解,已對 Isaac 驗到 0.024 mm |
+
+`ros2 run omx_vla_app expert --ros-args -p ik:=moveit|analytic|position_only` 切換。
+兩者都跑到 20/20。
 
 ```python
-from isaacsim.core.api import World
-from isaacsim.core.prims import SingleArticulation, SingleRigidPrim, SingleXFormPrim
-from isaacsim.core.utils.stage import open_stage
-from isaacsim.core.utils.viewports import set_camera_view
-from isaacsim.sensors.camera import Camera
-
-open_stage(str(ASSETS / "pick_cube.usd"))
-world = World(stage_units_in_meters=1.0, physics_dt=1/120.0, rendering_dt=1/30.0)
-arm  = world.scene.add(SingleArticulation(prim_path="/omx_f", name="omx_f"))
-cube = world.scene.add(SingleRigidPrim(prim_path="/World/task/cube", name="cube"))
-ee   = SingleXFormPrim(prim_path="/omx_f/link5/end_effector_link")
-cam  = Camera(prim_path="/World/task/cam_front", resolution=(640, 480), frequency=30)
-world.reset(); cam.initialize()
-dof_ix = [arm.dof_names.index(j) for j in CANONICAL_JOINTS]   # 7 個 DOF 裡取 6 個
+kin = MoveItKin()                    # 容器裡,約 1.3 秒啟動
+kin.seed = q_measured                # ⚠️ 每次都餵量到的關節值
+q = kin.ik([0.22, 0.10, 0.12])       # 夾持點的世界座標(公尺)→ 5 個弧度,或 None
 ```
 
-**IK**(`ArticulationKinematicsSolver.compute_inverse_kinematics` 的實際簽章):
-```python
-compute_inverse_kinematics(target_position, target_orientation=None,
-                           position_tolerance=None, orientation_tolerance=None)
-    -> (ArticulationAction, bool)
-```
-`target_orientation=None` 給位置-only IK,`orientation_tolerance` 可放寬 —— 5 軸手臂
-兩者都用得上。
+⚠️ **`position_only_ik: True`**(官方設定,不是我們加的)。5 軸手臂做不到任意 6-DOF
+姿態,所以只解位置、放掉朝向。夾爪俯仰角是算完才知道的(抓取瞬間落在 32–44°,
+斜著伸進去),`joint5` 也不受控制。**斜抓是可行的**,實測抓得起來。
 
-**Lula 需要一份 `robot_descriptor.yaml`(要你手寫,~20 行)**,範本在
-`standalone_examples/api/isaacsim.robot.manipulators/ur10e/rmpflow/robot_descriptor.yaml`:
-```yaml
-api_version: 1.0
-cspace: [joint1, joint2, joint3, joint4, joint5]
-default_q: [0.0, 0.0, 0.0, 0.0, 0.0]
-acceleration_limits: [10, 10, 10, 10, 10]
-jerk_limits: [10000, 10000, 10000, 10000, 10000]
-cspace_to_urdf_rules:
-  - {name: gripper_joint_1, rule: fixed, value: 0.0}
-  - {name: gripper_joint_2, rule: fixed, value: 0.0}
-collision_spheres: {}      # 純 IK 空的就好,只有 RMPflow 需要
-```
-EE frame 名稱是 `end_effector_link` —— 用 `solver.get_all_frame_names()` 確認。
+⚠️ **零空間有 2 個自由度而且沒有選擇準則**,答案幾乎完全由種子決定。讓求解器接著自己
+上一次的答案跑會漂,而且漂得很混亂 —— 曾經只是改了 collider 的近似方式(碰不到
+運動學),平均抓取俯仰角就從 44° 變成 7°。
 
-⚠️ **Lula 吃不吃這份 URDF 尚未實測。** `<ros2_control>` 是 urdfdom 會忽略的未知元素、
-`<mimic>` 是標準的,*應該*沒問題。若它拒絕,就做一份只有運動學的
-`omx_f_kinematics.urdf`。
+**解析解的那個坑**(如果要重寫):`joint2 → joint3` 的偏移向量是
+`(0.0415, 0, 0.11315)`,**偏離垂直 20.15°**(OpenManipulator-X 的經典肘偏置)。
+沒把這個常數帶進去,每個解都會系統性偏掉。`sim/ik.py` 從 URDF 讀,不寫死。
 
-**退路:解析解 IK**(~40 行)。`q1 = atan2(y, x)`,投影到垂直平面,沿接近方向退掉腕長
-(0.0287 + 0.09193 = 0.1206 m),用餘弦定理解 L₂ = 0.1205、L₃ = 0.162 的 2R。
-**陷阱:joint2→joint3 的偏移向量是 `(0.0415, 0, 0.11315)`,偏離垂直 20.15°**
-(OpenManipulator-X 的經典肘偏置)。沒把這個常數帶進去,每個解都會系統性偏掉。
-Lula 免費處理它,所以 Lula 優先。
+**自碰撞**:`moveit_kin` 解出來的姿態會先過自碰撞才回傳,碰到就擾動種子重解
+(預設 8 次)。Isaac 的 articulation 是 `enabledSelfCollisions = False`,穿模不會有
+任何人抗議,所以這道關卡是唯一擋得住的地方。
 
-**方塊**:`DynamicCuboid(size=0.025, mass=0.015)`,**務必自訂
-`PhysicsMaterial(static_friction=1.0, dynamic_friction=0.9, restitution=0.0)`** ——
-預設的 `static_friction=0.2` 太滑。
+### 場景與隨機化(都在 `task/pick_cube.task.yaml`,不要寫進程式碼)
 
-**隨機化**:用 `np.random.default_rng(seed)`,五行就好。**不要**用
-`omni.replicator` / `isaacsim.replicator.domain_randomization` —— 它們是為 SDG 擷取
-迴圈設計的,會跟手寫的 stepping loop 打架。
-取樣環帶:`r ∈ U[0.16, 0.26]`、`θ ∈ U[−50°, 50°]`、`yaw ∈ U[−45°, 45°]`、`z = 0.0125`。
-把 `seed` 與取樣結果存進 episode metadata,任何一集都能重現。
+**方塊**:2.5 cm、15 g,**自訂 `PhysicsMaterial(static_friction=1.0,
+dynamic_friction=0.9)`** —— 預設的 0.2 太滑。
 
-**成功判定**(幾何,不需要接觸感測器):
-```python
-p, _ = cube.get_world_pose(); ee_p, _ = ee.get_world_pose()
-lifted = p[2] > CUBE_HALF + 0.05
-held   = np.linalg.norm(p - ee_p) < 0.06
-success = lifted and held      # 必須連續成立 15 步(0.5 s)
-```
-`held` 擋掉「方塊被彈飛」;連續 15 步擋掉瞬間彈跳。**兩個都要**。
+**隨機化**:`sim/spawn.py` 是唯一的取樣器,用 `np.random.default_rng(seed)`。
+**不要**用 `omni.replicator` —— 它是為 SDG 擷取迴圈設計的,會跟控制迴圈打架。
+定案的環帶:`r ∈ U[0.16, 0.24]`、`θ ∈ U[−50°, 50°]`、`yaw ∈ U[−45°, 45°]`。
+`holdout_theta_deg: [[-35,-20],[20,35]]` 是**內側**的兩條保留帶(M5 的驗收用),
+不是外緣 —— 外緣同時也是最遠、最難的地方,拿它當保留區會把「泛化差」跟「本來就難」
+混在一起。
+
+**成功判定**在 `success:` 底下:抬高 `lift_height: 0.05` m、方塊離夾爪
+`max_ee_distance: 0.06` m 以內、連續成立 `hold_steps: 15`(0.5 s)。
+距離條件擋掉「方塊被彈飛」,連續 15 步擋掉瞬間彈跳,**兩個都要**。
 
 ---
 
@@ -462,19 +512,36 @@ collider 之後,先前錄的資料就作廢**。重錄 200 集才貴,先把旋�
 > 回歸驗證改成跑專家本身:`ros2 run omx_vla_app expert --ros-args -p episodes:=20`
 > —— 它每一集都完整做一次抓取與抬升,改任何物理參數後跑一次即可。
 
-### M2 — 腳本專家(1–2 天)
-Lula IK + 抓放狀態機。**先跑 1000 個取樣姿態的 IK,回報失敗率**,再錄任何東西。
-狀態機:`HOME → 開夾爪 → 方塊上方 +0.10 m → 下降到抓取高度 → 夾合(目標略超過接觸,
-如 −0.05 rad)→ 停 10 步 → 抬升 +0.15 m → 保持 15 步 → 判定`。
-waypoint 之間在**關節空間**以約 0.6 rad/s 內插,讓動作串流平滑。
-✅ 20 個隨機方塊位置中成功 ≥18。**還沒有 dataset。**
+### M2 — 腳本專家(1–2 天)—— ✅ **已完成**
+> 狀態機在 `sim/expert.py`(`APPROACH → DESCEND → CLOSE → LIFT → HOLD → DONE`),
+> ROS 執行器在 `src/omx_vla_app/omx_vla_app/expert_node.py`。
+>
+> ```bash
+> ros2 run omx_vla_app expert --ros-args -p episodes:=20            # 預設 moveit
+> ros2 run omx_vla_app expert --ros-args -p episodes:=20 -p ik:=analytic
+> ros2 run omx_vla_app expert --ros-args -p episodes:=20 -p holdout:=true
+> ```
+> **實測 moveit 20/20、analytic 20/20**,命令與量測的落差約 2.6–2.8 mm。
+>
+> ⚠️ **同一時間只能跑一個。** 兩個行程一起發 `/sync/command` 會互相污染,而且結果
+> 看起來只是「比較不穩」而不是壞掉。跑之前先 `pgrep -f omx_vla_app`。
+>
+> 兩個花了很多時間才找到的東西,不要退掉:
+> - **到位判定要看量測值,不能只看命令。** 只看命令的話手臂會落後十幾 mm(方塊才
+>   25 mm),夾合就發生在方塊上緣;靠夾合的 0.5 秒去追是時序巧合,重力力矩大的姿態
+>   就會失敗。`expert.settle_tol` / `settle_max_ticks` 就是這件事。
+> - **MoveIt 的種子每個 tick 從量到的關節值重設**,理由見 §5。
 
-### M3 — 走通骨架(1 天)**最小的端到端證明**
-錄 **5** 集 → `convert.py` → `lerobot-train --steps=200` → `serve.py` 載 checkpoint
-→ `eval.py` 驅動 Isaac。
+### M3 — 走通骨架(1 天)**最小的端到端證明** —— 錄製半邊已完成
+> `recorder.py` 已經在跑:`ros2 run omx_vla_app record --ros-args -p episodes:=5`
+> 寫出 `data/raw/ep_XXXXX/`,只留成功的回合。筆電上已產出 3 集。
+
+還沒做的是 `convert.py` → `lerobot-train --steps=200` → `eval.py` 驅動 Isaac。
 ✅ 手臂會因為訓練過的 checkpoint 而動。**它一定會失敗,那就是預期結果。**
 重點是每個接縫都通、每個 tensor shape 都對、`finalize()` 產出的 dataset 載得回來。
 **不要為了「省時間」跳過這步直接錄 200 集。**
+
+> **這是移植到這台機器之後的第一件事。** 需要 py3.12 + torch cu128,筆電做不了。
 
 ### M4 — 真正的資料集(半天,無人值守)
 200 集成功回合,完整隨機化。**專家要注入雜訊**:waypoint ±5 mm、接近高度 ±2 cm、
@@ -508,12 +575,17 @@ PyTorch 2.7 —— 剛好就是 Blackwell 需要的。
 閉迴路評估要自己寫 client。
 ✅ 保留區域成功率與 ACT 對照。
 
-### M7 — 接回 ROS seam(1 天)
-`policy_node` 訂閱相機與 `/joint_states`、發布 `/sync/command`。
-**完全複製 `omx_bridge_image/src/omx_bridge_app/omx_bridge_app/jog.py` 的寫法**:
-行程內起 `SyncNode` 強制 `mode:=command`、背景執行緒 spin、只用公開介面。
-✅ 同一個策略透過 bridge 驅動 Isaac,成功率相當。
-**這一步之後,指向真手臂只差一個 `targets:=real` 加一台真相機。**
+### M7 — ~~接回 ROS seam~~ **已經是現況了**
+> 專家、錄製、`eval` 全部已經走 `/sync/command`,而且 `expert_node.py` 就是照
+> `jog.py` 的寫法:行程內起 `SyncNode` 強制 `mode:=command`、背景執行緒 spin、
+> 只用公開介面。
+>
+> **所以 `policy_node` 不是一個里程碑,是把 `expert_node` 裡叫專家的那一行換成
+> 叫策略。** 剩下的差異只有推論要在哪個行程跑(torch 進不了 image,所以要嘛把
+> torch 裝進一個衍生 image,要嘛另開一個容器發 `/sync/command`)。
+
+**指向真手臂只差 `targets:=real` 加一台真相機。** ⚠️ 這台機器沒有真手臂,而且
+`expert_node.py` 寫死 `targets:=sim` —— 那一行是唯一擋住的東西,不要拿掉。
 
 ### M8(日後)— 人類示範
 在**使用者的筆電**上跑輕量 Isaac + leader 臂收人類示範(leader 接在筆電),
@@ -529,30 +601,34 @@ vla/                           # https://github.com/jcjcjc0705/vla
 ├── SERVER_CLAUDE_BRIEF.md     # 這份
 ├── task/pick_cube.task.yaml   # 唯一手改的設定:方塊尺寸/質量/摩擦、生成環帶、
 │                              # 相機姿態、夾爪開合值、drive override、成功門檻、fps
-├── assets/
-│   ├── pick_cube.usd          # 產生的;sublayer 指向 omx_f.usd
-│   └── omx_f_descriptor.yaml  # Lula cspace(手寫)
-├── sim/                       # Isaac python.sh — CPython 3.11,無 ros、無 torch
-│   ├── config.py              # 讀 task yaml + sim_real_bridge.profile(關節順序)
-│   ├── build_scene.py  scene.py  ik.py  expert.py
-│   ├── record.py              # 專家 → data/raw/
-│   ├── eval.py                # 策略 → 成功率(訓練區 vs 保留區)
-│   └── policy_client.py       # zmq client,跨 3.11/3.12 界線
-├── ml/                        # py3.12 uv venv — torch(單獨從 cu128 裝)+ lerobot
-│   ├── convert.py             # data/raw/ → LeRobot(ACT v3.0 / GR00T v2+modality.json)
-│   ├── train_act.sh  train_groot.sh
-│   └── serve.py               # 策略後面掛 zmq
-├── src/vla_app/               # ROS 2 py3.12 — M7 才用
-│   └── policy_node.py
+├── assets/pick_cube.usd       # 產生的(gitignored);sublayer 指向 omx_f.usd
+├── sim/                       # 用 Isaac 的直譯器跑 — CPython 3.11,無 ros、無 torch
+│   ├── task_config.py         # 讀 task yaml + sim_real_bridge.profile(關節順序)
+│   ├── build_scene.py         # 產生 pick_cube.usd(純 USD,不用 SimulationApp)
+│   ├── ik.py                  # 解析解運動學 + --check / --map / --isaac 驗證模式
+│   ├── expert.py              # 抓放狀態機(只有邏輯,執行在 ROS 那邊)
+│   ├── spawn.py               # 唯一的取樣器(含保留帶)
+│   ├── app.py  scene.py       # 行程內的 Isaac 路徑,只剩 ik.py --isaac 在用
+│   └── isaac_python.sh
+├── src/omx_vla_app/           # ROS 2 py3.12 — 在 omx_bridge_image 容器裡 build
+│   └── omx_vla_app/
+│       ├── expert_node.py     # 專家與錄製的執行器(entry: expert / record)
+│       ├── moveit_ik.py       # MoveItKin 的適配層(FK 走解析解)
+│       └── recorder.py        # → data/raw/
+├── docker/                    # compose 掛 vla/ 進 omx_bridge_image 容器
 └── data/                      # gitignored
 ```
+
+**還沒建的**:`convert.py`(raw → LeRobot)、訓練腳本、`eval.py`。它們要 py3.12 +
+torch,所以會落在另一個 image 或 venv,不在 `omx_bridge_image` 裡。
 
 ---
 
 ## 9. 不變條件(違反了會很難查)
 
-1. **絕不修改 `omx_f.usd`** —— 它是 sim↔real 校正鏈的一部分。所有增修都是
-   `pick_cube.usd` 裡的 override。
+1. **從這個 repo 不修改 `omx_f.usd`** —— 它是 sim↔real 校正鏈的一部分。所有任務
+   增修都是 `pick_cube.usd` 裡的 override。要動它就去 `omx_bridge_image` 那個 repo,
+   見 §3.2。
 2. **絕不對 `omx_f.usd` 用 `AddReference`** —— 用 sublayer,見 §3.1。
 3. **關節順序只有一個來源** —— `import sim_real_bridge.profile`,不要抄常數。
 4. **`action` 必須是合法的 `/sync/command` payload** —— 6 個關節、同順序、弧度、
@@ -560,8 +636,9 @@ vla/                           # https://github.com/jcjcjc0705/vla
 5. **`observation.state` 是量測值,不是命令值。**
 6. **torch 一定單獨從 cu128 索引裝**,不讓任何 requirements 檔釘它。
 7. **不要升級 Isaac Sim。** 版本已定為 `5.1.0-rc.19`,兩台機器一致。
-   這是**動工前評估過的決定,不是慣性**——6.0 確實是 Python 3.12(可消掉 §4.4 的 zmq
-   邊界)且能原生 source ROS 2 Jazzy(讓 M7 變簡單),但:
+   這是**動工前評估過的決定,不是慣性**——6.0 確實是 Python 3.12 且能原生 source
+   ROS 2 Jazzy,但那兩個好處現在都已經用別的方式拿到了(控制層在容器、Isaac 用自帶
+   的 jazzy bundle),所以升級的理由比當初更弱。此外:
    (a) 它目前是 **Early Developer Release、不是 GA**;
    (b) binding 的 public import path 搬了位置,§5 查證過的每個 API 都要重驗;
    (c) 5.1 已在這台 Blackwell 上實際跑起來過,相容性風險已退場;
@@ -573,12 +650,15 @@ vla/                           # https://github.com/jcjcjc0705/vla
 
 ## 10. 尚未查證的事(依賴前先確認)
 
-- Lula 能不能直接吃這份 URDF(§5)
-- `SingleArticulation(prim_path="/omx_f")` 對不對(用 `arm.dof_names` 確認)
-- 伺服器的 ROS distro(影響 M7 落在 Humble 還是 Jazzy)。Ubuntu 已確認是 24.04.4,
-  系統內建 Python 3.12.3
+- **轉檔器該怎麼處理過期影像。** 筆電上相機約 12 Hz、控制迴圈 30 Hz,所以大約每兩幀
+  重複一次像素。這台機器快得多,先跑幾集看 `meta.json` 的 `image_age_s` 再決定。
 - M5 的訓練速度估計(10–20 steps/s 是推測,先跑 500 步量)
 - GR00T 要的 LeRobot 格式版本與 lerobot 0.6 寫出的 v3.0 是否有落差(§4.4 的設計正是為此)
+- 推論要跑在哪個行程(見 M7)
+
+已經查證掉、不用再查的:ROS distro(容器裡是 Jazzy,Isaac 用自帶的 jazzy bundle)、
+`SingleArticulation(prim_path="/omx_f")`(對,但現在只有 `ik.py --isaac` 在用)、
+Lula(不用了,見 §5)。
 
 ## 11. 參考
 
