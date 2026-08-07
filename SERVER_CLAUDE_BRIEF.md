@@ -76,6 +76,8 @@ git clone https://gitlab.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image.
 #      registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image:latest cp -r /assets /out
 
 # 3. 同步引擎 —— **host 端**的 Isaac 腳本要它才知道關節順序
+#    HTTPS 不通就用 SSH:
+#    ssh://git@gitlab.screamtrumpet.csie.ncku.edu.tw:722/pochun/sim_real_bridge_image.git
 git clone https://gitlab.screamtrumpet.csie.ncku.edu.tw/pochun/sim_real_bridge_image.git
 
 # 4. 控制層的 image(引擎、profile、jog、MoveIt、Isaac prim 服務介面全在裡面)
@@ -93,6 +95,35 @@ docker pull registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image:late
 自己會找對地方 —— 容器裡 import 已安裝的 ROS 套件,host 上沿
 `task/pick_cube.task.yaml` 的 `paths.sim_real_bridge` candidates 找 checkout。
 兩條路指向同一份檔案的兩個副本,內容必須一致,所以**兩個都跟著 tag 走,不要各自改**。
+
+**設定這台機器**(0.2.2 起 `.env` 不進 repo,要自己從範本建):
+
+```bash
+cd omx_bridge_image
+cp docker/compose/.env.example docker/compose/.env
+# 填 ISAAC_SIM_PATH=/home/pochun/isaac_sim_5.1
+# ROS_DOMAIN_ID 維持 1
+```
+
+`scripts/isaac.sh` 與 compose 讀的是同一份 `.env`,所以 host 上的 Isaac 跟容器裡的
+節點不會分岔。**注意 `scripts/` 沒有烤進 image** —— 它只在 git clone 裡,所以
+`omx_bridge_image` 這個 repo 一定要 clone,不能只 `docker pull`。
+
+**起 Isaac:**
+
+```bash
+cd omx_bridge_image
+bash scripts/isaac.sh --streaming       # headless + WebRTC,使用者從筆電連
+```
+
+⚠️ **一定要用這支 script,不要直接跑 `isaac-sim.sh`。** host 只要 source 過任何
+ROS,Isaac 就會去那份 ROS 裡找 `isaac_ros2_messages`、找不到就放棄,而**沒有任何一個
+apt 裝的 ROS 有這個套件**(它只在 Isaac 自己的 bundle 裡)。症狀是場景看起來完全正常
+但 prim 服務一個都沒開,錯誤只是一行沒人會看的 warning。source 了 jazzy 也一樣壞 ——
+這跟發行版無關。
+
+⚠️ **eco mode 預設是關的**(要的話加 `--eco`)。它會壓算繪,而這台機器上算繪速率正是
+要量的東西 —— 見 §10。
 
 驗證兩邊都通:
 
