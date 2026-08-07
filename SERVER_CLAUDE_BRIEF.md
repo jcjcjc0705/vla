@@ -486,12 +486,21 @@ dynamic_friction=0.9)`** —— 預設的 0.2 太滑。
 
 ## 6. 資料集格式
 
+> **這段已對 lerobot 0.6.1 校正過**(2026-08-07 實跑)。原本寫的
+> `"dtype": "video"` 配 `use_videos=False` 會**直接 raise**,而 `shape` 用 list
+> 會讓每一幀都被拒。實作見 `ml/convert.py`。
+
 ```python
 features = {
   "observation.state": {"dtype": "float32", "shape": (6,),
       "names": ["joint1","joint2","joint3","joint4","joint5","gripper_joint_1"]},
   "action":            {"dtype": "float32", "shape": (6,), "names": [...同上...]},
-  "observation.images.front": {"dtype": "video", "shape": (3, 240, 320),
+  # ⚠️ "image" 不是 "video":dataset_metadata.py 明確 raise 「features contain
+  #    video keys but use_videos is False」。
+  # ⚠️ shape 必須是 **tuple**:validate_feature_numpy_array 用
+  #    `ndarray.shape != expected_shape` 比較,list 永遠不相等,錯誤訊息還會印出
+  #    兩個看起來一模一樣的 shape。
+  "observation.images.front": {"dtype": "image", "shape": (3, 240, 320),
       "names": ["channels","height","width"]},
   "observation.images.wrist": {...同上...},
 }
@@ -502,6 +511,20 @@ for f in frames: ds.add_frame({**f, "task": "pick up the cube"})
 ds.save_episode()
 ds.finalize()      # 必須 —— 少了它 parquet footer 永遠不會寫入
 ```
+
+**可以放心的事**:`validate_feature_image_or_video` 同時接受 `(C,H,W)` 與
+`(H,W,C)`,所以 PNG 讀出來直接餵,不必 transpose。
+
+⚠️ **推論時正規化不在 policy 裡。** checkpoint 帶著
+`policy_preprocessor_*` / `policy_postprocessor_*`,正確流程是
+`pre(obs) → policy.select_action → post(action)`,用
+`make_pre_post_processors(policy_cfg=..., pretrained_path=...)` 建。直接呼叫
+`select_action` 會餵進未正規化的弧度與像素、拿回未反正規化的動作 —— **手臂照樣會動,
+不會有任何錯誤**。preprocessor 內含 `to_batch_processor` 與 `device_processor`,
+所以觀測要給**未加 batch、CPU 上**的張量。
+
+⚠️ **lerobot 0.6.x 把功能拆成 extras**:要 `lerobot[dataset,training]`,
+否則 import 或訓練時才報 ImportError。
 
 - **`observation.state` 是量測到的關節位置**(`arm.get_joint_positions()[dof_ix]`),
   **不是**命令值。存成命令值的話 ACT 會學到恆等映射 —— 訓練分數很漂亮、實際什麼也不會。
@@ -612,8 +635,18 @@ PyTorch 2.7 —— 剛好就是 Blackwell 需要的。
 > 只用公開介面。
 >
 > **所以 `policy_node` 不是一個里程碑,是把 `expert_node` 裡叫專家的那一行換成
-> 叫策略。** 剩下的差異只有推論要在哪個行程跑(torch 進不了 image,所以要嘛把
-> torch 裝進一個衍生 image,要嘛另開一個容器發 `/sync/command`)。
+> 叫策略。** ~~剩下的差異只有推論要在哪個行程跑~~ —— **這題已經有答案了**:
+>
+> 推論就跑在控制容器裡。做了一個衍生 image `omx_vla_image`
+> (`FROM omx_bridge_image` + torch cu128 + lerobot),所以 torch 與 rclpy 共用同一個
+> 直譯器,`ml/eval.py` 一個行程就能跑策略又發 `/sync/command`。實測 M3 走通:
+> 3 集各跑滿 450 步、`/sync/command` 上量到 455 則無 NaN 的命令、手臂確實因
+> checkpoint 而動。
+>
+> ⚠️ 但 lerobot 逼著 numpy 升到 2.x,而那會讓 `moveit_py` **segfault**(不變條件 11),
+> 所以 `ik:=moveit`、`jog`、`ik_target`、`monitor` 要在另一個容器
+> (`omx_vla_ctrl`,`docker/compose/docker-compose-ctrl.yml`)。`eval.py` 用 analytic
+> 解算器,不受影響。
 
 **指向真手臂只差 `targets:=real` 加一台真相機。** ⚠️ 這台機器沒有真手臂,而且
 `expert_node.py` 寫死 `targets:=sim` —— 那一行是唯一擋住的東西,不要拿掉。
@@ -650,8 +683,24 @@ vla/                           # https://github.com/jcjcjc0705/vla
 └── data/                      # gitignored
 ```
 
-**還沒建的**:`convert.py`(raw → LeRobot)、訓練腳本、`eval.py`。它們要 py3.12 +
-torch,所以會落在另一個 image 或 venv,不在 `omx_bridge_image` 裡。
+~~**還沒建的**:`convert.py`、訓練腳本、`eval.py`~~ —— **已經建好了**(2026-08-07):
+
+```
+ml/                            # 學習層。跑在 omx_vla_image 容器裡
+├── convert.py                 # data/raw/ -> LeRobotDataset
+└── eval.py                    # checkpoint -> /sync/command
+docker/compose/
+├── docker-compose-vla.yml     # omx_vla_image  — 轉檔/訓練/推論/ik:=analytic
+└── docker-compose-ctrl.yml    # omx_bridge_image — ik:=moveit/jog/ik_target/monitor
+LAPTOP_CLAUDE_BRIEF.md         # 給筆電那邊的增量簡報
+```
+
+訓練沒有自己的腳本 —— 就是 `lerobot-train` CLI,參數記在 `LAPTOP_CLAUDE_BRIEF.md` §2。
+
+**環境全部在 docker 裡,沒有 venv 也沒有 conda。** 新 repo
+`gitlab.screamtrumpet.csie.ncku.edu.tw/pochun/omx_vla_image` 只放環境
+(Dockerfile + CI),這隻手臂的程式碼全部留在 `vla`。⚠️ 為什麼是兩個容器而不是一個,
+見不變條件 11。
 
 ---
 
@@ -678,18 +727,50 @@ torch,所以會落在另一個 image 或 venv,不在 `omx_bridge_image` 裡。
    **6.0 到 GA 之後,在 M6/M7 時再重新評估。** `rc.19 → 5.1.0 GA` 也不要換,
    除非真的撞到可歸因於 RC 的 bug。
 8. **只有成功的回合進資料集。**
+9. **控制迴圈用模擬時間,不用 wall clock。** `expert_node.ExpertClient.wait_sim()`。
+   Isaac 在 headless streaming 下**不限速**(實測 2.42x,且隨 GPU 負載浮動);
+   `time.sleep(1/30)` 會讓每個 tick 之間走掉 80 ms 模擬時間,種子軌跡一變,
+   position-only IK 的俯仰角就漂出可解範圍。**11/20 vs 19/20。**
+   ⚠️ kit 的限速參數(`rateLimitEnabled` / `rateLimitFrequency` /
+   `useFixedTimeStepping` / `useFastMode`)四個都試過,headless 下全部無效,
+   不要再試那條路。
+10. **`expert.reset()` 之前要把 IK 種子重設成量到的關節值。** 種子每個 tick 重設
+    那行在迴圈**裡面**,而規劃在迴圈**外面** —— 少了這行,規劃用的是上一集最後
+    留下的姿態,失敗會成塊出現(觀察到連續 3 集與連續 9 集),因為失敗的那集不進
+    迴圈、種子就永遠不會更新。**跟機器速度無關,筆電上一樣會發作。**
+11. **MoveIt 與 lerobot 不能裝在同一個 python 環境。** lerobot 要 `numpy>=2.0`,
+    而 `moveit_py` 是 C++ binding、numpy 2.0 破壞了 C ABI。**它 import 正常、
+    執行時 segfault,沒有任何訊息。** 所以有兩個容器:`omx_vla`(學習層,numpy 2.x)
+    與 `omx_vla_ctrl`(控制層,numpy 1.x + MoveIt)。⚠️ **不要用 import 檢查來判斷
+    MoveIt 可不可用** —— 這個錯誤已經犯過一次。
 
 ## 10. 尚未查證的事(依賴前先確認)
 
-- **轉檔器該怎麼處理過期影像。** 筆電上相機約 12 Hz、控制迴圈 30 Hz,所以大約每兩幀
-  重複一次像素。這台機器快得多,先跑幾集看 `meta.json` 的 `image_age_s` 再決定。
-- M5 的訓練速度估計(10–20 steps/s 是推測,先跑 500 步量)
-- GR00T 要的 LeRobot 格式版本與 lerobot 0.6 寫出的 v3.0 是否有落差(§4.4 的設計正是為此)
-- 推論要跑在哪個行程(見 M7)
+> 2026-08-07 在伺服器上實測後,前三題有答案了。
+
+- ✅ **轉檔器該怎麼處理過期影像 → 不必特別處理,但不是零重複。** 這台機器實測
+  `image_age_s` 平均 4.59 ms、最大 31.07 ms,而**唯一影像/幀 = 0.865** ——
+  相機在模擬時間上約 26 Hz 對 30 Hz 控制迴圈,13.5% 的 tick 重複像素(筆電是
+  12 Hz 對 30 Hz,約六成)。`convert.py` 照 index 展開、不丟不插值,只在統計裡報告。
+  ⚠️ `recorder.py` 的 age 仍是 wall clock 記的,而控制週期現在是 sim time(§4.3),
+  兩者不同基準 —— `0.865` 那個數字才是不依賴時鐘換算的。
+- ✅ **訓練速度 → 2 step/s,dataloader 是瓶頸。** 200 步、batch 8、`num_workers=4`:
+  `updt_s 0.028` vs `data_s 0.472`,dataloader 佔 94%。`use_videos=False` 已生效,
+  要調的是 `num_workers` 與 batch。**M5 開始前先量。**
+- ✅ **推論跑在哪個行程 → 就在控制容器裡。** 見 M7。
+- **GR00T 要的 LeRobot 格式版本與 lerobot 0.6 寫出的 v3.0 是否有落差**(§4.4 的設計
+  正是為此)—— 還沒查。
+- ⚠️ **新的未解問題:兩台機器的光照可能不同。** 這台的 Isaac 是從筆電複製過來的,
+  `omni.kit.stage_templates` 裡的資源路徑仍寫死 `/home/jcjcjc/Desktop/isaac_sim_5.1/...`,
+  所以預設 stage 的 DomeLight HDR 與一張地板材質**在這台載不到**(每次開 Isaac 都會刷
+  Error,連 `ik.py --isaac` 開的全新行程也一樣)。算繪本身正常、有光有陰影、相機影像
+  可用,但 **M8 要把筆電的人類示範併進同一個 dataset 之前,必須比對兩台的 `cam_front`**。
 
 已經查證掉、不用再查的:ROS distro(容器裡是 Jazzy,Isaac 用自帶的 jazzy bundle)、
 `SingleArticulation(prim_path="/omx_f")`(對,但現在只有 `ik.py --isaac` 在用)、
-Lula(不用了,見 §5)。
+Lula(不用了,見 §5)、**kit 的限速參數**(`rateLimitEnabled` / `rateLimitFrequency` /
+`useFixedTimeStepping` / `useFastMode` 四個都試過,headless streaming 下全部無效,
+見 §9.9)。
 
 ## 11. 參考
 
