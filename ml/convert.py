@@ -87,6 +87,17 @@ def load_episode(ep_dir: Path, joints, cameras):
             f"  dump: {got}\n  現在: {list(joints)}\n"
             "這份 raw 是用不同的 profile 錄的 —— 重錄,或 checkout 回當時的 tag。")
 
+    # Same idea for cameras: the recorder writes one entry per camera it saw, so
+    # a dump made before a camera was added (or renamed) has a different set.
+    # Caught here rather than as a KeyError three lines down, because the fix is
+    # "re-record" and the error should say so.
+    got_cams = set(meta.get("images", {}))
+    if got_cams and got_cams != set(cameras):
+        raise ConvertError(
+            f"{ep_dir.name} 的相機組合與現在的設定不一致。\n"
+            f"  dump: {sorted(got_cams)}\n  現在: {sorted(cameras)}\n"
+            "相機是在錄製當下決定的 —— 加了或改名之後,舊的 raw 不能用,要重錄。")
+
     state, action = npz["state"], npz["action"]
     n = len(state)
     if action.shape != state.shape:

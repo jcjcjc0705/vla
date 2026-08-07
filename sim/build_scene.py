@@ -39,6 +39,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import task_config  # noqa: E402
+import texture  # noqa: E402
 
 # USD cameras express aperture in tenths of a scene unit; 20.955 is the
 # 36 mm-film convention Isaac's own cameras use, so FOV maths lines up with
@@ -48,6 +49,16 @@ HORIZONTAL_APERTURE = 20.955
 
 def focal_length_for_fov(fov_deg: float, aperture: float = HORIZONTAL_APERTURE) -> float:
     return (aperture / 2.0) / math.tan(math.radians(fov_deg) / 2.0)
+
+
+def camera_prim_name(name):
+    """``rear_right`` -> ``cam_rear_right``.
+
+    One place decides how a camera's config key becomes a prim name, because
+    three separate pieces of this file have to agree on it: the prim author, the
+    render-product node and the verification pass.
+    """
+    return f"cam_{name}"
 
 
 def define_camera(stage, path, spec, parent_relative=False):
@@ -73,15 +84,55 @@ def define_camera(stage, path, spec, parent_relative=False):
     return cam
 
 
-def define_cube(stage, path, spec, material):
+# The six quads, wound counter-clockwise so each face's normal points outward,
+# in the order texture.cube_face_uvs() assigns atlas cells: +X -X +Y -Y +Z -Z.
+BOX_FACES = ((1, 2, 6, 5), (3, 0, 4, 7), (2, 3, 7, 6),
+             (0, 1, 5, 4), (4, 5, 6, 7), (3, 2, 1, 0))
+
+
+def box_mesh_points(size):
+    """The 8 corners of an axis-aligned cube centred on the origin."""
+    h = size / 2.0
+    return [Gf.Vec3f(x * h, y * h, z * h)
+            for x, y, z in ((-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+                            (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1))]
+
+
+def define_cube(stage, path, spec, material, uvs=None):
     """A dynamic, collidable cube with an explicit high-friction material.
 
     The explicit material matters: Isaac's default physics material is
     ``static_friction=0.2``, which is far too slippery for a 0.14 N pinch.
+
+    ⚠️ Authored as a **Mesh, not a UsdGeom.Cube**, because a procedural Cube
+    carries no UVs and therefore cannot take a texture. The cube needs one: a
+    uniformly coloured box is rotationally symmetric on camera, so
+    ``spawn.yaw_deg`` would vary the expert's actions without varying the
+    pixels. See sim/texture.py.
+
+    The physics is unchanged by that switch. ``boundingCube`` is an *exact*
+    approximation for a box (the local AABB is the box), so mass, friction and
+    contact behaviour match what the previous UsdGeom.Cube produced -- verified
+    by re-running the expert, not assumed.
     """
     size = spec["size"]
-    cube = UsdGeom.Cube.Define(stage, path)
-    cube.CreateSizeAttr(size)
+    cube = UsdGeom.Mesh.Define(stage, path)
+    cube.CreatePointsAttr(box_mesh_points(size))
+    cube.CreateFaceVertexCountsAttr([4] * 6)
+    cube.CreateFaceVertexIndicesAttr([i for face in BOX_FACES for i in face])
+    cube.CreateExtentAttr([Gf.Vec3f(-size / 2, -size / 2, -size / 2),
+                           Gf.Vec3f(size / 2, size / 2, size / 2)])
+    # ⚠️ Without this the renderer applies Catmull-Clark and the cube comes out
+    # as a rounded blob -- silently, and only in the render, so the physics still
+    # behaves like a box while every camera shows a ball.
+    cube.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+    if uvs is not None:
+        st = UsdGeom.PrimvarsAPI(cube).CreatePrimvar(
+            "st", Sdf.ValueTypeNames.TexCoord2fArray,
+            UsdGeom.Tokens.faceVarying)
+        st.Set([Gf.Vec2f(*uv) for uv in uvs])
+    # Kept as a fallback: if the texture fails to resolve, the cube stays red
+    # rather than defaulting to grey and becoming invisible against the floor.
     cube.CreateDisplayColorAttr([Gf.Vec3f(*spec["color"])])
     # Spawned properly by scene.py each episode; this is just a sane resting
     # place so the generated stage opens with the cube visible on the ground.
@@ -95,12 +146,90 @@ def define_cube(stage, path, spec, material):
     prim = cube.GetPrim()
     UsdPhysics.RigidBodyAPI.Apply(prim)
     UsdPhysics.CollisionAPI.Apply(prim)
+    # Exact for a box, and cheap. A Mesh without this defaults to a triangle
+    # mesh collider, which PhysX will not let a dynamic body use.
+    UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr(
+        UsdPhysics.Tokens.boundingCube)
     UsdPhysics.MassAPI.Apply(prim).CreateMassAttr(spec["mass"])
     UsdShade.MaterialBindingAPI.Apply(prim)
     UsdShade.MaterialBindingAPI(prim).Bind(
         material, UsdShade.Tokens.weakerThanDescendants, "physics"
     )
     return cube
+
+
+def define_textured_material(stage, path, texture_file, roughness=0.75):
+    """A UsdPreviewSurface driven by one texture, read through the ``st`` primvar.
+
+    ``wrapS/wrapT`` are **clamp**, not repeat. Both surfaces here carry UVs that
+    span 0..1 exactly once, so clamping is a no-op that also guarantees a
+    mistake in the UVs shows up as a stretched edge rather than as a tiled
+    pattern -- and a tiled floor is the one thing this must not produce (a
+    periodic signal correlated with position aliases every tile-width).
+    """
+    mat = UsdShade.Material.Define(stage, path)
+
+    reader = UsdShade.Shader.Define(stage, f"{path}/stReader")
+    reader.CreateIdAttr("UsdPrimvarReader_float2")
+    reader.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
+    reader.CreateOutput("result", Sdf.ValueTypeNames.Float2)
+
+    tex = UsdShade.Shader.Define(stage, f"{path}/Texture")
+    tex.CreateIdAttr("UsdUVTexture")
+    tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(texture_file)
+    tex.CreateInput("wrapS", Sdf.ValueTypeNames.Token).Set("clamp")
+    tex.CreateInput("wrapT", Sdf.ValueTypeNames.Token).Set("clamp")
+    tex.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(
+        reader.ConnectableAPI(), "result")
+    tex.CreateOutput("rgb", Sdf.ValueTypeNames.Float3)
+
+    shader = UsdShade.Shader.Define(stage, f"{path}/Shader")
+    shader.CreateIdAttr("UsdPreviewSurface")
+    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(roughness)
+    shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).ConnectToSource(
+        tex.ConnectableAPI(), "rgb")
+    shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+
+    mat.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+    return mat
+
+
+def define_table(stage, path, spec, material):
+    """A textured quad over the work area. **Visual only -- no collider.**
+
+    ⚠️ It does not replace the floor. ``/Environment/ground`` comes in from the
+    sublayer, is 100 m across, and carries UVs spanning 0..1 over that whole
+    span -- so a texture on it would give the 0.5 m work area about five pixels.
+    Physics keeps using that floor; this quad only supplies what the cameras see.
+
+    Sitting ``lift`` above z=0 avoids z-fighting with the floor underneath. It
+    has to be **above**, not below, or the opaque floor hides it; the cube then
+    appears to sink by that much, which at 0.5 mm against a 25 mm cube is 2% and
+    not visible. Nothing physical touches it, so the resting height of the cube
+    is unchanged.
+    """
+    half = spec["size"] / 2.0
+    cx, cy = spec["center"][0], spec["center"][1]
+    lift = spec["lift"]
+    quad = UsdGeom.Mesh.Define(stage, path)
+    quad.CreatePointsAttr([Gf.Vec3f(cx - half, cy - half, lift),
+                           Gf.Vec3f(cx + half, cy - half, lift),
+                           Gf.Vec3f(cx + half, cy + half, lift),
+                           Gf.Vec3f(cx - half, cy + half, lift)])
+    quad.CreateFaceVertexCountsAttr([4])
+    quad.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+    quad.CreateExtentAttr([Gf.Vec3f(cx - half, cy - half, lift),
+                           Gf.Vec3f(cx + half, cy + half, lift)])
+    quad.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+    st = UsdGeom.PrimvarsAPI(quad).CreatePrimvar(
+        "st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying)
+    st.Set([Gf.Vec2f(0, 0), Gf.Vec2f(1, 0), Gf.Vec2f(1, 1), Gf.Vec2f(0, 1)])
+
+    prim = quad.GetPrim()
+    UsdShade.MaterialBindingAPI.Apply(prim)
+    UsdShade.MaterialBindingAPI(prim).Bind(material)
+    return quad
 
 
 def define_physics_material(stage, path, spec):
@@ -275,10 +404,17 @@ def add_cube_tf_nodes(stage, cfg, report):
 
 
 def add_camera_nodes(stage, cfg, report):
-    """Publish both cameras on ROS.
+    """Publish every camera in ``ros.camera_topics`` on ROS.
 
     A render product has to be created for each camera first --
     ``ROS2CameraHelper`` publishes *a render product*, not a camera prim.
+
+    ⚠️ Each camera costs render time on every tick. Two 640x480 cameras
+    published at ~57 Hz on the RTX Pro 6000; the rate falls roughly in
+    proportion as cameras are added, and once it drops below the 30 Hz control
+    loop the dataset starts repeating pixels between frames. That is visible in
+    `meta.json`'s `image_age_s` and in the converter's "唯一影像/幀" figure --
+    measure it after changing this list rather than assuming.
     """
     graph = f"{cfg.robot_root}/ActionGraph"
     tick = Sdf.Path(f"{graph}/on_playback_tick.outputs:tick")
@@ -286,12 +422,15 @@ def add_camera_nodes(stage, cfg, report):
     ros = cfg["ros"]
     y = 400.0
 
-    for name, prim_path in (("front", f"{cfg.task_root}/cam_front"),
-                            ("wrist", f"{cams['wrist']['parent']}/cam_wrist")):
+    for name in ros["camera_topics"]:
+        spec = cams[name]
+        parent = spec.get("parent")
+        root = parent if parent else cfg.task_root
+        prim_path = f"{root}/{camera_prim_name(name)}"
         if not stage.GetPrimAtPath(prim_path).IsValid():
             report.append(f"FAIL  找不到相機 {prim_path}")
             return False
-        w, h = cams[name]["resolution"]
+        w, h = spec["resolution"]
 
         rp = stage.DefinePrim(f"{graph}/render_product_{name}", "OmniGraphNode")
         rp.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
@@ -361,15 +500,57 @@ def build(cfg: task_config.Config, force: bool) -> int:
     UsdGeom.Xform.Define(stage, "/World")
     UsdGeom.Xform.Define(stage, task_root)
 
+    # ── textures ───────────────────────────────────────────────────────
+    # Generated here rather than shipped: a seed makes them reproducible, and
+    # PNG bytes do not belong in a source repo. Written beside the stage so the
+    # asset paths in the material can stay relative and the scene remains
+    # movable between machines.
+    tspec = cfg["textures"]
+    tex_dir = out.parent / "textures"
+    tex_dir.mkdir(parents=True, exist_ok=True)
+    tbl = tspec["table"]
+    if tbl.get("style", "wood") == "wood":
+        texture.wood_texture(
+            str(tex_dir / "table.png"), seed=tspec["seed"],
+            light=tuple(tbl["wood_light"]), dark=tuple(tbl["wood_dark"]),
+            rings=tbl["rings"], distortion=tbl["distortion"], knots=tbl["knots"],
+            sharpness=tbl.get("sharpness", 1.6))
+    else:
+        texture.floor_texture(
+            str(tex_dir / "table.png"), seed=tspec["seed"],
+            base=tuple(tbl["base_color"]), contrast=tbl["contrast"],
+            speckles=tbl["speckles"], speckle_radius=tuple(tbl["speckle_radius"]))
+    texture.cube_texture(str(tex_dir / "cube.png"), seed=tspec["seed"])
+
+    table_mat = define_textured_material(
+        stage, f"{task_root}/Looks/table", "textures/table.png")
+    define_table(stage, f"{task_root}/table", tspec["table"], table_mat)
+
     material = define_physics_material(
         stage, f"{task_root}/PhysicsMaterials/cube", cfg["cube"]
     )
-    define_cube(stage, f"{task_root}/cube", cfg["cube"], material)
+    cube_mat = define_textured_material(
+        stage, f"{task_root}/Looks/cube", "textures/cube.png", roughness=0.55)
+    cube = define_cube(stage, f"{task_root}/cube", cfg["cube"], material,
+                       uvs=texture.cube_face_uvs())
+    # The visual binding is separate from the physics one above -- that goes on
+    # the "physics" purpose, this on the default, so they do not displace
+    # each other.
+    UsdShade.MaterialBindingAPI(cube.GetPrim()).Bind(cube_mat)
 
+    # One prim per entry in `ros.camera_topics` -- that dict is the camera list,
+    # here and in the recorder, the converter and eval.py. A camera with a
+    # `parent` rides on the arm and is placed in the parent's frame; everything
+    # else is a fixed environment camera placed in world coordinates.
     cams = cfg["cameras"]
-    define_camera(stage, f"{task_root}/cam_front", cams["front"])
-    wrist = cams["wrist"]
-    define_camera(stage, f"{wrist['parent']}/cam_wrist", wrist, parent_relative=True)
+    camera_paths = {}
+    for name in cfg["ros"]["camera_topics"]:
+        spec = cams[name]
+        parent = spec.get("parent")
+        root = parent if parent else task_root
+        camera_paths[name] = f"{root}/{camera_prim_name(name)}"
+        define_camera(stage, camera_paths[name], spec,
+                      parent_relative=bool(parent))
 
     # ── overrides on the sublayer's prims ───────────────────────────────
     report = []
@@ -406,9 +587,12 @@ def build(cfg: task_config.Config, force: bool) -> int:
     # traversal is consumed, and every prim in the range expires under you.
     base_stage = Usd.Stage.Open(str(cfg.robot_usd))
     base = list(base_stage.Traverse())
+    # Everything under task_root is ours, plus any camera that rides on the arm
+    # and therefore lives under the robot's own prims.
+    arm_mounted = {p for p in camera_paths.values() if not p.startswith(task_root)}
     added = [
         str(p.GetPath()) for p in prims
-        if str(p.GetPath()).startswith(task_root) or "cam_wrist" in str(p.GetPath())
+        if str(p.GetPath()).startswith(task_root) or str(p.GetPath()) in arm_mounted
     ]
     deps = [d for d in check.GetRootLayer().GetCompositionAssetDependencies() if d]
 
@@ -426,8 +610,7 @@ def build(cfg: task_config.Config, force: bool) -> int:
     if deps != [rel]:
         print(f"FAIL  外部相依應該只有 {rel}")
         ok = False
-    for must in (f"{task_root}/cube", f"{task_root}/cam_front",
-                 f"{wrist['parent']}/cam_wrist"):
+    for must in [f"{task_root}/cube", *camera_paths.values()]:
         if not check.GetPrimAtPath(must).IsValid():
             print(f"FAIL  少了 {must}")
             ok = False
