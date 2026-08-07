@@ -7,16 +7,28 @@
 #   ros2 run omx_vla_app expert --ros-args -p episodes:=20
 #   ros2 run omx_bridge_app jog sim                              # drive it by hand
 #
-# The image already provides the engine, the profile and jog. This adds only the
-# task: the VLA repo is mounted so `r` rebuilds it in place.
+#   python3 ml/convert.py                                        # raw -> LeRobotDataset
+#   lerobot-train --dataset.repo_id=... --policy.type=act ...     # 訓練
+#   python3 ml/eval.py --checkpoint outputs/.../pretrained_model  # 讓策略開手臂
+#
+# 全部在同一個容器裡,**不需要 venv 或 conda**:omx_vla_image 同時帶著 ROS 與
+# torch,而 eval.py 需要兩者在同一個行程。
+#
+# The image already provides the engine, the profile, jog and the training
+# stack. This adds only the task: the VLA repo is mounted so `r` rebuilds it in
+# place.
 name: omx_vla
 
 services:
   vla:
-    # 引擎、profile、jog、MoveIt 解算器、Isaac prim 服務介面都在這個 image 裡。
+    # omx_vla_image = omx_bridge_image + torch(cu128) + lerobot。所以這一個容器
+    # 裡同時有引擎、profile、jog、MoveIt 解算器、Isaac prim 服務介面,**以及**
+    # 訓練與推論的堆疊 —— `eval.py` 需要 torch 與 rclpy 在同一個行程,那是這條
+    # 鏈長成這樣的原因。
+    #
     # 這裡的原始碼如果比 image 新,症狀是一行 ModuleNotFoundError —— 先
     # docker compose pull。
-    image: registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_bridge_image:latest
+    image: registry.screamtrumpet.csie.ncku.edu.tw/pochun/omx_vla_image:latest
     container_name: omx_vla
     network_mode: host
     ipc: host
@@ -37,3 +49,15 @@ services:
     command: sleep infinity
     stdin_open: true
     tty: true
+    # The control nodes do not need a GPU, but eval.py does: the policy and
+    # rclpy have to run in the same process (torch to infer, rclpy to publish
+    # /sync/command), and this container is the only place both exist. Isaac
+    # keeps running natively on the host and is unaffected -- they share the
+    # card, which the 96 GB has room for.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
