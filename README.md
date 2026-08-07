@@ -36,7 +36,8 @@ GR00T 只吃 LeRobot dataset,不在乎資料怎麼來。人類示範留到 M8,�
 
 **為什麼不用 Isaac Lab / LeIsaac?**
 NVIDIA 的 LeIsaac 配方綁 Isaac Lab 2.1 + Isaac Sim 4.5/5.0,你裝的是 5.1.0。
-借它的想法就好。你的 Isaac 已經內建 `PickPlaceController`、Lula IK、`ParallelGripper`。
+借它的想法就好。(附帶一提,Isaac 內建的 `PickPlaceController` / Lula IK 最後也沒用 ——
+控制程式跑在容器裡,碰不到 Isaac 的直譯器。運動學是自己的解析解加 MoveIt。)
 
 ---
 
@@ -49,7 +50,7 @@ NVIDIA 的 LeIsaac 配方綁 Isaac Lab 2.1 + Isaac Sim 4.5/5.0,你裝的是 5.1.
 | 示範來源 | 腳本專家(M8 再補人類示範,用你筆電) |
 | 模型 | 先 ACT,再 GR00T N1.7 |
 | 跑在哪 | 全在伺服器。筆電只當觀看端 |
-| 真手臂 | **完全不參與**,連 ROS 都不接 |
+| 真手臂 | **完全不參與**。但 ⚠️ 見下方「真手臂為什麼不會動」 |
 | Isaac 版本 | `5.1.0-rc.19`,**兩台已確認一致**,不重裝、不升 6.0 |
 
 ---
@@ -57,16 +58,32 @@ NVIDIA 的 LeIsaac 配方綁 Isaac Lab 2.1 + Isaac Sim 4.5/5.0,你裝的是 5.1.
 ## 進度
 
 - [x] **M0** 環境查證 — ✅ **完成**,見下方
-- [x] **M1** 場景 + 兩台相機 + 夾起方塊 — ✅ **含自動回歸測試**(mimic 剛度 25→1000)
-- [ ] **M2** 腳本專家(1–2 天)
-- [ ] **M3** 走通骨架:錄 5 集 → 訓 200 步 → 手臂會動(1 天)
+- [x] **M1** 場景 + 兩台相機 + 夾起方塊 — ✅(關鍵是 mimic 剛度 25→1000)
+- [x] **M2** 腳本專家 — ✅ **moveit 20/20、analytic 20/20**
+- [ ] **M3** 走通骨架:錄 5 集 → 訓 200 步 → 手臂會動
+      — 錄製半邊已完成(`recorder.py`,筆電上已錄 3 集),
+      `convert.py` / 訓練 / `eval.py` 要 py3.12 + torch,**移到伺服器才做得了**
 - [ ] **M4** 錄 200 集(半天,無人值守)
 - [ ] **M5** 訓 ACT + **在沒看過的位置評估**
 - [ ] **M6** 微調 GR00T N1.7
-- [ ] **M7** 接回 `/sync/command`
+- [x] **M7** 接回 `/sync/command` — ✅ 提早做掉了,專家與錄製本來就走這條
 - [ ] **M8** 人類示範(日後)
 
 停在任何一步都有東西:M2 有腳本抓放 demo、M5 有訓練好的策略、M7 有可部署的。
+
+---
+
+## ⚠️ 真手臂為什麼不會動
+
+早期的說法是「連 ROS 都不接」。**那已經不成立了** —— 整套現在跑在 ROS 上,而且用
+`ROS_DOMAIN_ID=1`,跟真 follower 同一個 DDS domain。專家發的是 `/sync/command`,
+那正是 `jog real` 用來驅動真臂的同一個 topic。
+
+真臂不動的唯一原因是 [`expert_node.py`](src/omx_vla_app/omx_vla_app/expert_node.py)
+起引擎時寫死了 `targets:=sim`。引擎只把命令轉給被指名的端點,`sim` 就只到 Isaac。
+
+**所以:改那一行之前先想清楚,而且不要在真 follower 通電時做實驗。** 這不是理論
+風險 —— 筆電上 `omx_follower` 容器常常是開著的。
 
 ---
 
@@ -90,10 +107,20 @@ NVIDIA 的 LeIsaac 配方綁 Isaac Lab 2.1 + Isaac Sim 4.5/5.0,你裝的是 5.1.
 - **ML 那層跑容器**(符合你既有做法),**Isaac 留原生**。GPU 是共用的,還有 92 GB,
   可以跟別人並存不用等。
 
-## 下一步:M1
+## 下一步:把 M3 的後半做完
 
-在**你筆電**上做(物理是 CPU、`enableGPUDynamics=False`,不需要伺服器)。
-建場景 → 加方塊與兩台相機 → 手動夾起來 → 把成功的參數寫進 `task/pick_cube.task.yaml`。
+筆電做得到的都做完了 —— 場景、專家、錄製都在跑。**卡住的是 `convert.py` 之後那一段,
+它要 py3.12 + torch cu128,筆電上沒有。**
+
+移到伺服器之後的順序:
+
+1. `convert.py`:`data/raw/` → LeRobotDataset。先拿筆電錄的那 3 集當輸入,確認
+   shape 與 `finalize()` 都對。
+2. `lerobot-train --steps=200` 跑通,再 `eval.py` 讓手臂因為 checkpoint 而動。
+   **它一定會失敗,那就是預期結果** —— 這步證的是接縫,不是效果。
+3. 才開始 M4 的 200 集。
+
+實作細節在 [`SERVER_CLAUDE_BRIEF.md`](SERVER_CLAUDE_BRIEF.md)。
 
 ---
 
