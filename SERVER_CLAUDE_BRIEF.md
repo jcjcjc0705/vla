@@ -415,9 +415,19 @@ Isaac。**你手動開 Isaac、載場景、按 Play,然後在容器裡 `ros2 run
 `recorder.py` 寫 `data/raw/ep_XXXXX/{frames.npz, img_*.png, meta.json}`;
 轉檔器(3.12)產生 dataset。
 
-LeRobot 一年內走過 v2 → v2.1 → v3.0,而 **GR00T 要的是 LeRobot v2 變體 +
-`meta/modality.json`**,ACT 走 v3.0。留一份格式無關的原始傾印,換格式是重跑
+LeRobot 一年內走過 v2 → v2.1 → v3.0。留一份格式無關的原始傾印,換格式是重跑
 `convert.py`,不是重錄 200 集。
+
+> **2026-08-07 更正:** 原文說「GR00T 要的是 LeRobot v2 變體 + `meta/modality.json`,
+> ACT 走 v3.0」——**那個落差不存在**。lerobot 0.6.1 把 GR00T 包成標準 policy,
+> ACT 與 GR00T 吃**同一份 v3.0 dataset**(見 M6)。
+>
+> 這**不會**讓原始傾印變得多餘,理由換成了另外兩個,而且更硬:
+>
+> * **`data/raw/` 的 PNG 是無損的。** dataset 那層若改用 MP4(`use_videos=True`)
+>   是 H.264 有損壓縮 —— 只有原始層無損,「換格式是重跑轉檔」這個保險才成立。
+> * **相機組合與紋理都改過。** 這個專案已經因為加相機、改方塊幾何而讓舊資料作廢
+>   兩次。原始傾印讓「改 dataset 的呈現方式」跟「改場景」分開,只有後者需要重錄。
 
 影像在寫入前降到 `cameras.record_resolution`(320×240)。用算繪解析度存的話一集
 約 47 MB,200 集就是 9 GB 的、策略根本不會用到那個尺寸的像素。
@@ -680,13 +690,50 @@ ACT 預設(resnet18 + ImageNet 權重、`dim_model=512`、`n_obs_steps=1`、
 發生的話回頭加大隨機化與專家雜訊,不要往下走。
 
 ### M6 — 微調 GR00T N1.7
-`nvidia/GR00T-N1.7-3B`、`--embodiment-tag NEW_EMBODIMENT`(就是為自訂手臂設計的)。
-從同一份 `data/raw/` 轉出 GR00T 要的格式 + `meta/modality.json`。
-微調建議 40 GB+ VRAM(你有 96 GB)。GR00T 自己釘 Python 3.12 / CUDA 12.8 /
-PyTorch 2.7 —— 剛好就是 Blackwell 需要的。
-先 `gr00t/eval/open_loop_eval.py` 做離線檢查,再接 inference server/client 進 Isaac。
-⚠️ GR00T 內建的 sim benchmark 是 LIBERO / SimplerEnv / RoboCasa,**不含 Isaac Sim**,
-閉迴路評估要自己寫 client。
+
+> **2026-08-07 更正:比原本寫的簡單得多。** 原文說「從同一份 `data/raw/` 轉出
+> GR00T 要的格式 + `meta/modality.json`」——**不需要**。lerobot 0.6.1 已經把
+> GR00T 包成一個標準 policy(`--policy.type=groot`),它的 docstring 明說
+> 「Dataset loading and training orchestration are handled by LeRobot's standard
+> training stack」,模組裡也**沒有任何 `modality.json` 的引用**。
+>
+> 所以 M5 的 ACT 與 M6 的 GR00T **吃完全相同的 dataset**,不必再寫一支轉檔器,
+> 也因此可以直接對照。
+
+```bash
+lerobot-train --dataset.repo_id=screamlab/omx_pick_cube --dataset.root=data/lerobot \
+  --policy.type=groot --policy.base_model_path=nvidia/GR00T-N1.7-3B \
+  --policy.embodiment_tag=new_embodiment --policy.device=cuda ...
+```
+
+前置只有一項:`pip install 'lerobot[groot]'`(該 extra 存在)。
+
+`GrootConfig` 的預設值(讀原始碼確認的):
+
+```
+backbone              Qwen3-VL       ← vision 與 language 都在這裡
+n_obs_steps           1              ← 單幀觀測,不吃歷史
+chunk_size / n_action_steps   40
+max_state_dim / max_action_dim 132   ← 6 維的 state 會被 zero-pad
+tune_llm              False          ← 預設凍結語言模型
+tune_visual           False          ← 預設凍結視覺 backbone
+tune_projector        True           ← 只訓練 projector
+tune_diffusion_model  True           ← 與 action head
+```
+
+⚠️ **GR00T 內部自己做 state/action 正規化**(per-embodiment 的 q01/q99 百分位),
+所以 lerobot 對它的 normalization 是 `IDENTITY` —— 跟 ACT 完全不同的路徑。影像
+正規化則交給 Qwen3-VL 的 image processor。
+
+⚠️ **語言那一維在這個資料集裡是退化的**:`task` 是常數字串,200 集全部一樣。
+這是**刻意的、也是正確的** —— 使用者要的是單一物體、夾起來就算成功,訓練/測試/
+驗證都用同一句指令。常數指令正是 `new_embodiment` 微調的標準做法,而
+`tune_llm=False` 的預設也剛好對應。**不要**為了「看起來像 VLA」而去製造指令
+多樣性 —— 那需要場上有多個目標讓語言真的攜帶資訊,是另一個任務。
+
+微調建議 40 GB+ VRAM(你有 96 GB),而且凍結 backbone 之後需求更低。
+⚠️ GR00T 內建的 sim benchmark 是 LIBERO / SimplerEnv / RoboCasa,**不含 Isaac Sim**
+—— 但閉迴路評估不必自己寫 client,`ml/eval.py` 已經在做那件事,換個 policy 型別即可。
 ✅ 保留區域成功率與 ACT 對照。
 
 ### M7 — ~~接回 ROS seam~~ **已經是現況了**
