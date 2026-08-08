@@ -87,16 +87,20 @@ def load_episode(ep_dir: Path, joints, cameras):
             f"  dump: {got}\n  現在: {list(joints)}\n"
             "這份 raw 是用不同的 profile 錄的 —— 重錄,或 checkout 回當時的 tag。")
 
-    # Same idea for cameras: the recorder writes one entry per camera it saw, so
-    # a dump made before a camera was added (or renamed) has a different set.
-    # Caught here rather than as a KeyError three lines down, because the fix is
-    # "re-record" and the error should say so.
+    # ``cameras`` here is whatever subset --cameras asked for, not necessarily
+    # every camera the recorder saw. The check is therefore "requested ⊆
+    # recorded", not equality: recorded-but-unused cameras are fine (that is
+    # the whole point of --cameras), a requested camera that was never
+    # recorded is not. Caught here rather than as a KeyError three lines down,
+    # because the fix is "re-record" or "drop it from --cameras" and the error
+    # should say which.
     got_cams = set(meta.get("images", {}))
-    if got_cams and got_cams != set(cameras):
+    missing = set(cameras) - got_cams
+    if missing:
         raise ConvertError(
-            f"{ep_dir.name} 的相機組合與現在的設定不一致。\n"
-            f"  dump: {sorted(got_cams)}\n  現在: {sorted(cameras)}\n"
-            "相機是在錄製當下決定的 —— 加了或改名之後,舊的 raw 不能用,要重錄。")
+            f"{ep_dir.name} 沒有錄到這些相機:{sorted(missing)}\n"
+            f"  這集實際錄的:{sorted(got_cams)}\n"
+            "相機是在錄製當下決定的 —— 只能從有錄到的裡面選,缺的要重錄。")
 
     state, action = npz["state"], npz["action"]
     n = len(state)
@@ -180,11 +184,24 @@ def main(argv=None):
     ap.add_argument("--repo-id", default="screamlab/omx_pick_cube")
     ap.add_argument("--force", action="store_true", help="輸出目錄已存在就砍掉重建")
     ap.add_argument("--limit", type=int, default=0, help="只轉前 N 集(除錯用)")
+    ap.add_argument("--cameras", default=None,
+                    help="逗號分隔的相機子集,例如 front_left,front_right,wrist"
+                         "(預設全部)。錄製時五台都存了 —— 這裡只決定要不要放進"
+                         "這份 dataset,同一份 raw 可以轉出好幾個子集比較。")
     args = ap.parse_args(argv)
 
     cfg = task_config.load()
     joints = list(cfg.joints)
-    cameras = list(cfg["ros"]["camera_topics"])
+    all_cameras = list(cfg["ros"]["camera_topics"])
+    if args.cameras:
+        cameras = [c.strip() for c in args.cameras.split(",") if c.strip()]
+        unknown = set(cameras) - set(all_cameras)
+        if unknown:
+            raise ConvertError(
+                f"不認得的相機:{sorted(unknown)}\n"
+                f"可用(來自 ros.camera_topics):{sorted(all_cameras)}")
+    else:
+        cameras = all_cameras
     resolution = tuple(cfg["cameras"]["record_resolution"])
     fps = cfg["timing"]["fps"]
 
@@ -200,7 +217,9 @@ def main(argv=None):
     print(f"raw      : {raw_root}  ({len(eps)} 集)")
     print(f"out      : {out}")
     print(f"joints({len(joints)}): {', '.join(joints)}")
-    print(f"cameras  : {', '.join(cameras)}  @ {resolution[0]}x{resolution[1]}")
+    print(f"cameras  : {', '.join(cameras)}  @ {resolution[0]}x{resolution[1]}"
+          + (f"  (從 {len(all_cameras)} 台選 {len(cameras)} 台)"
+             if len(cameras) != len(all_cameras) else ""))
     print(f"fps      : {fps}")
 
     if out.exists():
