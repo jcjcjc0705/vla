@@ -32,8 +32,10 @@ task is M5's problem.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import threading
+from pathlib import Path
 
 import numpy as np
 import rclpy
@@ -160,14 +162,27 @@ def main(argv=None):
               "\n       先用 CPU 跑(會慢,推論可能追不上模擬)。")
         known.device = "cpu"
 
-    from lerobot.policies import make_pre_post_processors
-    from lerobot.policies.act.modeling_act import ACTPolicy
+    from lerobot.policies import get_policy_class, make_pre_post_processors
 
-    print(f"[eval] 載入 {known.checkpoint}  (device={known.device})")
-    policy = ACTPolicy.from_pretrained(known.checkpoint).to(known.device).eval()
+    # The policy type comes from the checkpoint, not from a flag or a hard-coded
+    # class. ACT and GR00T are trained from the same dataset and evaluated by
+    # this same file (M5 vs M6), so naming one of them here would mean a second
+    # evaluator for the other -- and two evaluators is two definitions of
+    # success. ``get_policy_class`` imports the modeling module lazily, so
+    # nothing drags in GR00T's transformers stack when running ACT.
+    ptype = json.loads(
+        (Path(known.checkpoint) / "config.json").read_text())["type"]
+    print(f"[eval] 載入 {known.checkpoint}  (type={ptype} device={known.device})")
+    policy = get_policy_class(ptype).from_pretrained(
+        known.checkpoint).to(known.device).eval()
     # Rebuilt from the checkpoint, not reconstructed by hand: the normalizer
     # carries the dataset's own mean/std, and a policy fed with anyone else's
     # statistics produces plausible-looking nonsense.
+    #
+    # ⚠️ This matters *differently* for GR00T: it normalizes state and action
+    # internally (per-embodiment q01/q99), so lerobot registers IDENTITY for
+    # those and the real work here is the image side. Same call either way --
+    # which is the point of building it from the checkpoint.
     pre, post = make_pre_post_processors(
         policy_cfg=policy.config,
         pretrained_path=known.checkpoint,
