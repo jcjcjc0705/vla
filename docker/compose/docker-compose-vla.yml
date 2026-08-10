@@ -41,6 +41,12 @@ services:
       # once (/vla/src/... and /workspaces/src/...), so task_config cannot find
       # the repo by counting directories up from __file__ -- it reads this.
       - VLA_ROOT=/vla
+      # Where GR00T's weights land. Pointed at a mounted directory so the
+      # ~10-15 GB download survives `docker compose down`, and so it is NOT
+      # baked into the image -- the registry already forced torch to be split
+      # across six layers to get pushed at all, and weights are a product
+      # rather than an environment.
+      - HF_HOME=/vla/.hf_cache
     volumes:
       # The whole repo: ml/ and isaac/ are plain scripts run by path, task/ is
       # the spec, data/ is where episodes land.

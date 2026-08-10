@@ -23,3 +23,7 @@ assets/textures/
 
 # isaac/fetch_assets.sh 從 omx_bridge_image 匯出的副本 —— 產物,不進 git
 .image_cache/
+
+# GR00T 的權重(約 10-15 GB)。跟 .image_cache 一樣是產物,而且是 gated 模型,
+# 下載一次就留著 —— HF_HOME 指到這裡,容器重建也不用重抓。
+.hf_cache/
