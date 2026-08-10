@@ -1,6 +1,6 @@
 """Generate ``assets/pick_cube.usd`` from ``task/pick_cube.task.yaml``.
 
-The task scene is the robot plus a cube, two cameras, and a few physics
+The task scene is the robot plus a cube, five cameras, and a few physics
 overrides. It is authored with **plain USD** -- no ``SimulationApp`` -- so this
 runs in seconds, needs no GPU, and does not disturb anyone else using Isaac on
 the same machine.
