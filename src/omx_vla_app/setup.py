@@ -14,12 +14,9 @@ setup(
     zip_safe=True,
     maintainer='screamlab',
     maintainer_email='a0905256272@gmail.com',
-    description='Run the pick-cube expert against Isaac over ROS.',
+    description='Shared task layer: config, kinematics, cube sampling.',
     license='Apache-2.0',
-    entry_points={
-        'console_scripts': [
-            'expert = omx_vla_app.expert_node:main',
-            'record = omx_vla_app.expert_node:record_main',
-        ],
-    },
+    # No console_scripts on purpose -- this package is a library. The programs
+    # live in data_collection (expert, record) and ml/ (convert, eval), and all
+    # of them import from here so the task is described in exactly one place.
 )

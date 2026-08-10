@@ -4,22 +4,23 @@
   <name>omx_vla_app</name>
   <version>0.1.0</version>
   <description>
-    VLA task tooling for the OMX follower, driven entirely over ROS.
+    What "pick the cube" means, in one place: the task config, the closed-form
+    kinematics, the MoveIt wrapper and the cube-pose sampler.
 
-    Runs inside omx_bridge_image against its public interface: commands go out on
-    /sync/command and the twin's state comes back on the profile's sim endpoint.
-    The cube is read and moved through Isaac's own prim services, so an episode
-    needs no Isaac-side scripting -- open the scene, press Play, ros2 run.
+    A library, not a program. Four executables in three incompatible Python
+    environments read it -- isaac/build_scene.py under Isaac's 3.11, the expert
+    and recorder under the control container, ml/convert.py and ml/eval.py under
+    the ML container -- so it holds nothing heavier than PyYAML and numpy, and
+    imports rclpy nowhere.
+
+    ⚠️ moveit_ik.py is the exception: it needs the control container. See its
+    docstring for why it cannot be used from the ML side.
   </description>
   <maintainer email="a0905256272@gmail.com">screamlab</maintainer>
   <license>Apache-2.0</license>
 
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <exec_depend>sim_real_bridge</exec_depend>
-  <exec_depend>omx_bridge_app</exec_depend>
-  <exec_depend>tf2_msgs</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

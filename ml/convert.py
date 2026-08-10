@@ -46,9 +46,12 @@ import numpy as np
 from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "sim"))
+# 共用層(task_config / ik / spawn / moveit_ik)是 src/omx_vla_app 這個 ROS
+# package。容器裡 colcon 已經裝好了,這行是 no-op;host 上的 Isaac 沒有 source
+# 過 workspace,靠這行才找得到。三個環境因此可以用同一種 import 寫法。
+sys.path.insert(0, str(REPO_ROOT / "src" / "omx_vla_app"))
 
-import task_config  # noqa: E402
+from omx_vla_app import task_config  # noqa: E402
 
 TASK_STRING = "pick up the cube"
 
@@ -62,7 +65,7 @@ def episode_dirs(raw_root: Path):
     if not eps:
         raise ConvertError(
             f"{raw_root} 裡沒有任何含 frames.npz 的 ep_* 目錄。\n"
-            "先錄資料:ros2 run omx_vla_app record --ros-args -p episodes:=N")
+            "先錄資料:ros2 run data_collection record --ros-args -p episodes:=N")
     return eps
 
 

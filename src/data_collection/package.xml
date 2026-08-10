@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>data_collection</name>
+  <version>0.1.0</version>
+  <description>
+    Scripted demonstrations for the OMX follower: run the expert, record what it did.
+
+    Everything happens over omx_bridge_image's public interface -- commands go out
+    on /sync/command, the twin's state comes back on the profile's sim endpoint,
+    and the cube is read and moved through Isaac's own prim services. An episode
+    therefore needs no Isaac-side scripting: open the scene, press Play, ros2 run.
+
+    The kinematics, the config loader and the spawn sampler live in omx_vla_app
+    because eval.py needs the same ones -- an evaluation that measures something
+    other than what was demonstrated measures nothing.
+  </description>
+  <maintainer email="a0905256272@gmail.com">screamlab</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>sim_real_bridge</exec_depend>
+  <exec_depend>omx_bridge_app</exec_depend>
+  <exec_depend>omx_vla_app</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

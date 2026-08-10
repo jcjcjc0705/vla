@@ -1,4 +1,4 @@
-"""MoveIt's IK, adapted to the interface ``sim/ik.py`` presents.
+"""MoveIt's IK, adapted to the interface ``ik.py`` presents.
 
 The solver itself lives in the bridge image (``omx_bridge_app.moveit_kin``) --
 it is this arm's kinematics, not this task's, and ``ik_target`` uses the same one.

@@ -20,3 +20,6 @@ __pycache__/
 
 # build_scene.py 產生的程序性紋理 —— 產物,seed 在 task yaml 裡
 assets/textures/
+
+# isaac/fetch_assets.sh 從 omx_bridge_image 匯出的副本 —— 產物,不進 git
+.image_cache/

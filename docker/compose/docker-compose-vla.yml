@@ -3,8 +3,8 @@
 # Isaac is NOT started by this. Open it yourself, load vla/assets/pick_cube.usd,
 # press Play, then in here:
 #
-#   ros2 run omx_vla_app expert                                  # 5 episodes
-#   ros2 run omx_vla_app expert --ros-args -p episodes:=20
+#   ros2 run data_collection expert                              # 5 episodes
+#   ros2 run data_collection record --ros-args -p episodes:=500  # 錄進 data/raw
 #   ros2 run omx_bridge_app jog sim                              # drive it by hand
 #
 #   python3 ml/convert.py                                        # raw -> LeRobotDataset
@@ -37,15 +37,21 @@ services:
       # anything and it looks exactly like a broken scene.
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-1}
       - FASTDDS_BUILTIN_TRANSPORTS=UDPv4
-      # Where the nodes find sim/ik.py and sim/expert.py -- the same modules the
-      # native Isaac runs use. There is one expert, not two.
+      # ⚠️ Load-bearing, not cosmetic. omx_vla_app is mounted at two paths at
+      # once (/vla/src/... and /workspaces/src/...), so task_config cannot find
+      # the repo by counting directories up from __file__ -- it reads this.
       - VLA_ROOT=/vla
     volumes:
-      # The whole repo: sim/ for the shared logic, task/ for the spec.
+      # The whole repo: ml/ and isaac/ are plain scripts run by path, task/ is
+      # the spec, data/ is where episodes land.
       - ../..:/vla
-      # The task package, built in place with `r`. The Isaac service
-      # interfaces and their client come from the image.
+      # ⚠️ One line per package -- do NOT mount ../../src over /workspaces/src.
+      # The image was built with `colcon build --symlink-install`: install/
+      # points at build/, which points back at src/, so covering /workspaces/src
+      # leaves the image's own sim_real_bridge and omx_bridge_app as dangling
+      # symlinks. It fails as an ImportError that looks like a broken image.
       - ../../src/omx_vla_app:/workspaces/src/omx_vla_app
+      - ../../src/data_collection:/workspaces/src/data_collection
     command: sleep infinity
     stdin_open: true
     tty: true

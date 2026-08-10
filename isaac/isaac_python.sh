@@ -11,7 +11,7 @@
 # reads it at exec), which is why this is a wrapper rather than a few lines
 # inside the Python file.
 #
-#   bash sim/isaac_python.sh sim/build_scene.py --force
+#   bash isaac/isaac_python.sh isaac/build_scene.py --force
 set -euo pipefail
 
 ISAAC="${ISAAC_SIM_PATH:-}"
