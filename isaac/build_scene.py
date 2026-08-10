@@ -25,7 +25,7 @@ Two rules this file exists to enforce:
 The generated USD is a build artifact and is gitignored; regenerate it rather
 than copying it between machines.
 
-    ./python.sh sim/build_scene.py [--force]
+    bash isaac/isaac_python.sh isaac/build_scene.py [--force]
 """
 from __future__ import annotations
 
@@ -37,8 +37,14 @@ from pathlib import Path
 
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import task_config  # noqa: E402
+HERE = Path(__file__).resolve().parent
+REPO_ROOT = HERE.parent
+# 共用層(task_config / ik / spawn / moveit_ik)是 src/omx_vla_app 這個 ROS
+# package。容器裡 colcon 已經裝好了,這行是 no-op;host 上的 Isaac 沒有 source
+# 過 workspace,靠這行才找得到。三個環境因此可以用同一種 import 寫法。
+sys.path.insert(0, str(REPO_ROOT / "src" / "omx_vla_app"))
+sys.path.insert(0, str(HERE))            # texture.py 是 isaac/ 自己的
+from omx_vla_app import task_config  # noqa: E402
 import texture  # noqa: E402
 
 # USD cameras express aperture in tenths of a scene unit; 20.955 is the
@@ -108,7 +114,7 @@ def define_cube(stage, path, spec, material, uvs=None):
     carries no UVs and therefore cannot take a texture. The cube needs one: a
     uniformly coloured box is rotationally symmetric on camera, so
     ``spawn.yaw_deg`` would vary the expert's actions without varying the
-    pixels. See sim/texture.py.
+    pixels. See isaac/texture.py.
 
     The physics is unchanged by that switch. ``boundingCube`` is an *exact*
     approximation for a box (the local AABB is the box), so mass, friction and
@@ -636,7 +642,7 @@ def main():
     args = ap.parse_args()
     try:
         cfg = task_config.load()
-    except task_task_config.ConfigError as exc:
+    except task_config.ConfigError as exc:
         print(f"[build_scene] {exc}")
         return 1
     print(cfg.summary(), "\n")

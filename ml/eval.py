@@ -16,7 +16,8 @@ lerobot requires 2.x. That split is why there are two compose files.
 kinematics the success test needs. That is what keeps inference on the numpy 2.x
 side of the split.
 
-**This is ``expert_node.run_episode`` with the expert replaced by a policy.**
+**This is ``data_collection.expert.run_episode`` with a policy in the expert's
+place.**
 The reset, the cube placement, the settle behaviour and the success test are
 the same code reached through the same seam, because an evaluation that
 measures something other than what was demonstrated measures nothing. The
@@ -33,7 +34,6 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
-import time
 
 import numpy as np
 import rclpy
@@ -42,16 +42,11 @@ from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from sim_real_bridge.profile import load_profile
 from sim_real_bridge.sync_node import SyncNode
 
+from data_collection.expert import ExpertClient
 from omx_bridge_app import ros_args
-from omx_vla_app.expert_node import ExpertClient
-
-VLA_ROOT = "/vla"
-if f"{VLA_ROOT}/sim" not in sys.path:
-    sys.path.insert(0, f"{VLA_ROOT}/sim")
-
-import task_config                                       # noqa: E402
-from ik import OMXKinematics                             # noqa: E402
-from spawn import sample_cube_pose                       # noqa: E402
+from omx_vla_app import task_config
+from omx_vla_app.ik import OMXKinematics
+from omx_vla_app.spawn import sample_cube_pose
 
 
 def observation(client, cfg):
@@ -147,7 +142,7 @@ def main(argv=None):
     known, rest = ap.parse_known_args(argv[1:])
 
     # ⚠️ targets:=sim is not a default, it is a guard. This machine has no real
-    # arm; expert_node hard-codes the same thing for the same reason.
+    # arm; the expert hard-codes the same thing for the same reason.
     rclpy.init(args=ros_args([argv[0]] + rest, "profile",
                              extra=["-p", "mode:=command", "-p", "targets:=sim"]))
     engine = SyncNode()

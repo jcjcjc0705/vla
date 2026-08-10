@@ -5,7 +5,7 @@
 #   lerobot 0.6.x 硬性要求 numpy>=2.0,<2.3
 #   moveit_py 是 C++ binding,而 numpy 2.0 破壞了 C ABI
 #
-# 實測(2026-08-07,伺服器):在 numpy 2.2.6 之下 `ros2 run omx_vla_app expert`
+# 實測(2026-08-07):在 numpy 2.2.6 之下 `ros2 run data_collection expert`
 # (預設 ik:=moveit)會 **Segmentation fault**;把 apt 的 numpy 1.26.4 放回 sys.path
 # 最前面之後,同一個指令正常跑完。⚠️ import 完全正常,執行時才掛,而且沒有任何訊息 ——
 # 所以這條界線用兩個 image 畫死,不靠執行時記得設 PYTHONPATH。
@@ -16,13 +16,13 @@
 #                             (這一份)            ik:=moveit、jog、ik_target、monitor
 #
 # ⚠️ 兩個容器可以並存,但**一次只能有一個行程發 /sync/command**。跑之前:
-#     docker exec omx_vla      pgrep -f omx_vla_app
-#     docker exec omx_vla_ctrl pgrep -f omx_vla_app
+#     docker exec omx_vla      pgrep -f 'data_collection|omx_vla'
+#     docker exec omx_vla_ctrl pgrep -f 'data_collection|omx_vla'
 #
 # 用法(跟 vla.sh 一樣,只是換一份 compose):
 #     bash docker/scripts/ctrl.sh
-#     r                                                    # 第一次要 build
-#     ros2 run omx_vla_app expert --ros-args -p episodes:=20   # 預設 ik:=moveit
+#     r                                                        # 第一次要 build
+#     ros2 run data_collection expert --ros-args -p episodes:=20   # 預設 ik:=moveit
 #     ros2 run omx_bridge_app jog sim
 
 name: omx_vla_ctrl
@@ -42,7 +42,13 @@ services:
       - VLA_ROOT=/vla
     volumes:
       - ../..:/vla
+      # ⚠️ 一個 package 一條,**不要**整包 ../../src:/workspaces/src 蓋上去。
+      # image 是用 `colcon build --symlink-install` 建的,install/ 指到 build/、
+      # build/ 再指回 src/,所以蓋掉 /workspaces/src 會讓 image 自己的
+      # sim_real_bridge 與 omx_bridge_app 變成斷掉的 symlink —— 症狀是 import
+      # 失敗,但看起來像是 image 壞了。
       - ../../src/omx_vla_app:/workspaces/src/omx_vla_app
+      - ../../src/data_collection:/workspaces/src/data_collection
     command: sleep infinity
     stdin_open: true
     tty: true

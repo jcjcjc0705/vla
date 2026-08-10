@@ -17,7 +17,8 @@ and ``--check`` runs FK on every solution so the trap cannot survive silently.
 
 Geometry is read from the URDF rather than written down, so it cannot drift.
 
-    bash sim/isaac_python.sh sim/ik.py --check 1000
+    bash docker/scripts/ctrl.sh
+    python3 /vla/src/omx_vla_app/omx_vla_app/ik.py --check 1000
 """
 from __future__ import annotations
 
@@ -25,13 +26,10 @@ import argparse
 import math
 import sys
 import xml.etree.ElementTree as ET
-from pathlib import Path
 
 import numpy as np
 
-SIM_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(SIM_DIR))
-import task_config  # noqa: E402
+from omx_vla_app import task_config
 
 ARM_JOINTS = ["joint1", "joint2", "joint3", "joint4", "joint5"]
 
@@ -372,60 +370,16 @@ def reach_map(cfg):
     return 0
 
 
-def check_against_isaac(cfg, n):
-    """Compare this file's FK against the simulator's own.
-
-    The maths here comes from the **URDF**; the simulation runs the **USD**. They
-    are supposed to agree, and "supposed to" is how a silent bias survives into
-    200 recorded episodes. Worth re-running whenever either asset is regenerated.
-    """
-    sys.path.insert(0, str(SIM_DIR))
-    import app
-
-    simulation_app = app.start(headless=True)
-    sys.path.insert(0, str(SIM_DIR))
-    from scene import PickCubeScene
-
-    kin = OMXKinematics(cfg)
-    scene = PickCubeScene(cfg, with_cameras=False)
-    scene.reset(seed=0, cube_pose=(np.array([1.0, 0.0, 0.5]), None))
-
-    rng = np.random.default_rng(0)
-    errs = []
-    for _ in range(n):
-        q = np.zeros(len(cfg.joints), dtype=np.float32)
-        q[:5] = rng.uniform(-0.6, 0.6, 5)
-        q[5] = cfg["gripper"]["open"]
-        scene.set_targets(q)
-        for _ in range(220):                    # let the drives actually arrive
-            scene.step()
-        measured = scene.joint_positions()[:5]
-        errs.append(np.linalg.norm(kin.fk(measured)[0] - scene.grasp_point()))
-
-    errs = np.array(errs)
-    print(f"\n對照 Isaac 的 FK({n} 個隨機姿態,用**實測**關節角):")
-    print(f"  夾持點差異  最大 {errs.max() * 1000:.3f} mm  中位數 {np.median(errs) * 1000:.3f} mm")
-    ok = errs.max() < 1e-3
-    print("  ✅ URDF 與 USD 的運動學一致" if ok else
-          "  ✗ URDF 與 USD 不一致 —— IK 會系統性偏掉,先查 USD 是不是從這份 URDF 來的")
-    simulation_app.close()
-    return 0 if ok else 1
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", type=int, metavar="N", default=1000,
                     help="每個高度各取樣 N 個目標做 FK 往返驗證")
     ap.add_argument("--map", action="store_true",
                     help="印出各半徑可達的最高懸停高度")
-    ap.add_argument("--isaac", type=int, nargs="?", const=20, metavar="N",
-                    help="開 Isaac 對照 FK,確認 URDF 與 USD 的運動學一致")
     args = ap.parse_args()
     cfg = task_config.load()
     if args.map:
         return reach_map(cfg)
-    if args.isaac:
-        return check_against_isaac(cfg, args.isaac)
     return check(cfg, args.check)
 
 

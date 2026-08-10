@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'omx_vla_app'
+package_name = 'data_collection'
 
 setup(
     name=package_name,
@@ -14,9 +14,12 @@ setup(
     zip_safe=True,
     maintainer='screamlab',
     maintainer_email='a0905256272@gmail.com',
-    description='Shared task layer: config, kinematics, cube sampling.',
+    description='Run the pick-cube expert against Isaac over ROS, and record it.',
     license='Apache-2.0',
-    # No console_scripts on purpose -- this package is a library. The programs
-    # live in data_collection (expert, record) and ml/ (convert, eval), and all
-    # of them import from here so the task is described in exactly one place.
+    entry_points={
+        'console_scripts': [
+            'expert = data_collection.expert:main',
+            'record = data_collection.expert:record_main',
+        ],
+    },
 )

@@ -15,10 +15,39 @@ from pathlib import Path
 
 import yaml
 
-import spawn as _spawn
+from omx_vla_app import spawn as _spawn
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-TASK_FILE = REPO_ROOT / "task" / "pick_cube.task.yaml"
+TASK_REL = Path("task") / "pick_cube.task.yaml"
+
+
+def _find_repo_root() -> Path:
+    """Locate the repo by looking for the task file, not by counting directories.
+
+    ⚠️ Counting ``parent`` levels off ``__file__`` does not work here. This
+    package is mounted at **two** paths inside the containers:
+
+        /vla/src/omx_vla_app/          the whole repo
+        /workspaces/src/omx_vla_app/   the ROS workspace colcon builds from
+
+    A ROS node imports through the workspace, so ``__file__`` resolves under
+    /workspaces and any fixed number of ``.parent`` lands on the wrong place.
+    ``VLA_ROOT`` is set by both compose files precisely for this; the upward
+    search is the fallback for the host (Isaac), where nothing sets it.
+    """
+    env = os.environ.get("VLA_ROOT")
+    if env and (Path(env) / TASK_REL).exists():
+        return Path(env)
+    for p in Path(__file__).resolve().parents:
+        if (p / TASK_REL).exists():
+            return p
+    raise RuntimeError(
+        f"找不到 {TASK_REL} —— 從 {Path(__file__).resolve()} 往上找過每一層都沒有。\n"
+        "在容器裡請確認 VLA_ROOT 有設(compose 會設成 /vla);"
+        "在 host 上請從 repo 內執行。")
+
+
+REPO_ROOT = _find_repo_root()
+TASK_FILE = REPO_ROOT / TASK_REL
 
 
 class ConfigError(RuntimeError):
@@ -28,8 +57,10 @@ class ConfigError(RuntimeError):
 def _resolve(candidates, must_contain, what):
     """依序試 candidates,回傳第一個存在且含有 must_contain 的目錄。
 
-    路徑在筆電與伺服器上不同,又不想散落 machine-specific 的設定,所以列一組候選
-    讓它自己找。找不到時的錯誤訊息要包含試過哪些,不然使用者無從下手。
+    候選只有兩條,而且指的是**同一個 image 的內容出現在兩個位置**:容器內烤在根
+    目錄,host 上由 isaac/fetch_assets.sh 匯出到 .image_cache。不是「兩台機器」——
+    見 task/pick_cube.task.yaml 的 paths 區塊。找不到時的錯誤訊息要列出試過哪些,
+    不然使用者無從下手。
     """
     tried = []
     for c in candidates:

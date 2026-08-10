@@ -6,22 +6,27 @@
 #
 # ⚠️ 改 cube 或 gripper 底下的東西會讓先前錄的資料作廢(物理變了)。
 
+# 這隻手臂的資料(USD、meshes、profile)**只有一個來源:omx_bridge_image**。
+#
+# 底下兩個候選不是「兩台機器」,是**容器內 vs host** —— 同一個 image 的內容在兩個
+# 位置出現:
+#
+#   /               容器內。image 把 assets/ 與 profile/ 烤在根目錄
+#   .image_cache    host。由 isaac/fetch_assets.sh 從**同一個 image** 匯出
+#
+# ⚠️ 先前這裡列了三條各自 clone 出來的 checkout 路徑。那是錯的設計:每一份都可能
+# 跟正在跑的 image 不同版本,而症狀會是「場景看起來對但數字不對」這種最難查的東西。
+# 現在兩個候選指的都是同一個 image 的內容。
+#
+# host 上第一次使用(或 pull 了新的 omx_bridge_image 之後)要跑:
+#   bash isaac/fetch_assets.sh
 paths:
-  # 相對於這個 repo 的根目錄。找不到時 config.py 會依序試 candidates。
-  # omx_bridge_image 的 checkout。原生 Isaac 讀 USD/URDF 要 host 上的檔案,
-  # 沒 clone 的機器可以從 image 取出:
-  #   docker run --rm -v "$PWD:/out" <image> cp -r /assets /out
+  # 相對於這個 repo 的根目錄。找不到時 task_config.py 會說是哪幾條路徑失敗。
   omx_bridge:
-    - "../../docker/robot/omx_bridge_image"                # 筆電 checkout
-    - "../omx_bridge_image"                                # 伺服器並排 clone 時
-    - "~/omx_vla/omx_bridge_image"
-    - "/"                                                  # 容器內:image 把 assets/
-                                                           # 跟 profile/ 烤在根目錄,
-                                                           # 相對佈局跟 repo 一樣
-  sim_real_bridge:                                        # 只為了 profile.py(關節順序的真相)
-    - "../../docker/bridge/sim_real_bridge_image/bridge"   # 筆電
-    - "../sim_real_bridge_image/bridge"                    # 伺服器
-    - "~/omx_vla/sim_real_bridge_image/bridge"
+    - "/"                       # 容器內
+    - ".image_cache"            # host,fetch_assets.sh 匯出的
+  sim_real_bridge:              # 只為了 profile.py(關節順序的唯一真相)
+    - ".image_cache"            # host。容器內是已安裝的 ROS 套件,不走這條
   # 相對於 omx_bridge_image
   robot_usd: "assets/omx_f.usd"
   robot_urdf: "assets/omx_f/omx_f.urdf"
@@ -79,7 +84,7 @@ cube:
 spawn:
   # ⚠️ 外緣不能再往外。夾爪垂直朝下時手腕必須先高出目標 114.6mm,那段吃掉的
   # 是平面 2R 的 0.2825m 額度 —— r=0.24 最高只能懸停 85mm,r=0.26 連抓取高度
-  # 都搆不到。改動前先跑 sim/ik.py --map。
+  # 都搆不到。改動前先跑 omx_vla_app/ik.py --map。
   radius: [0.16, 0.24]            # m
   theta_deg: [-50.0, 50.0]        # 繞 +Z,0 = +X 方向
   yaw_deg: [-45.0, 45.0]          # 方塊自身朝向
@@ -182,7 +187,7 @@ cameras:
 #      ±45°,但沒有表面細節時那個變化在像素上根本不存在 —— 兩集只差 yaw 會產生
 #      一模一樣的影像卻對應不同的專家動作。那是標註雜訊,而且不是多收資料就能解的。
 #
-# 兩張圖都由 sim/texture.py 程式生成(產物,gitignored),seed 記在這裡所以可重現。
+# 兩張圖都由 isaac/texture.py 程式生成(產物,gitignored),seed 記在這裡所以可重現。
 textures:
   seed: 0
   table:
