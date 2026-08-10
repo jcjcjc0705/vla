@@ -30,6 +30,15 @@ silently wastes the whole speedup.
 
 ⚠️ ``--policy.push_to_hub=false`` is still required (lerobot rejects the config
 without it, complaining about ``repo_id`` in a message that sounds unrelated).
+
+**``--tensorboard``** writes scalars to ``<output_dir>/tb``. lerobot only knows
+how to log to W&B, so this borrows that seam -- see ``ml/tb_logger.py``.
+
+    python3 ml/train.py --tensorboard ... --output_dir=outputs/act_v1
+    tensorboard --logdir outputs/act_v1 --bind_all      # 另一個終端
+
+⚠️ ``tensorboard`` is pip-installed into the running container, which does not
+survive ``docker compose down``. Add it to omx_vla_image's Dockerfile to keep it.
 """
 from __future__ import annotations
 
@@ -42,12 +51,37 @@ import fast_chunk_patch  # noqa: E402
 
 _CTX = "--dataloader_multiprocessing_context"
 
+
+def _has(argv, flag):
+    return any(a == flag or a.startswith(flag + "=") for a in argv)
+
+
 if __name__ == "__main__":
     fast_chunk_patch.apply()
     argv = sys.argv[1:]
-    if not any(a == _CTX or a.startswith(_CTX + "=") for a in argv):
+
+    want_tb = "--tensorboard" in argv
+    if want_tb:
+        argv = [a for a in argv if a != "--tensorboard"]
+
+    if not _has(argv, _CTX):
         # fork, so the workers inherit the patched class. See the warning above.
-        sys.argv = [sys.argv[0], f"{_CTX}=fork", *argv]
+        argv = [f"{_CTX}=fork", *argv]
+
+    if want_tb:
+        import tb_logger
+
+        tb_logger.install()
+        # ⚠️ These two only get the logger past lerobot's construction gate
+        # (`if cfg.wandb.enable and cfg.wandb.project`). The class behind the
+        # name is now TensorBoardLogger -- wandb is never imported and nothing
+        # is uploaded. Anything the caller passed explicitly still wins.
+        if not _has(argv, "--wandb.enable"):
+            argv = ["--wandb.enable=true", *argv]
+        if not _has(argv, "--wandb.project"):
+            argv = ["--wandb.project=tensorboard", *argv]
+
+    sys.argv = [sys.argv[0], *argv]
     from lerobot.scripts.lerobot_train import main
 
     sys.exit(main())

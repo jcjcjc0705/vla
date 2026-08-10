@@ -714,6 +714,22 @@ python3 ml/train.py --dataset.repo_id=screamlab/omx_pick_cube \
 **`num_workers=4` 就夠了。** 修好之後 `data_s` 是 0.012 s、`updt_s` 是 0.172 s,
 瓶頸完全在 GPU,加到 8 沒有變化。
 
+**要看曲線就加 `--tensorboard`**,scalar 寫到 `<output_dir>/tb`:
+
+```bash
+python3 ml/train.py --tensorboard ... --output_dir=outputs/act_v1
+tensorboard --logdir outputs/act_v1 --bind_all      # 另一個終端
+```
+
+lerobot 0.6.1 只會記到 W&B,所以 `ml/tb_logger.py` 借用同一個接縫(把
+`WandBLogger` 這個名字換成 TensorBoard 的寫入器)。**wandb 完全沒被 import,
+也沒有任何東西上傳** —— 但因為建構的閘門是 `if cfg.wandb.enable and
+cfg.wandb.project`,`train.py` 會補上那兩個旗標。看到 `wandb.enable=true`
+出現在 `--tensorboard` 的設定裡不用緊張,就是這個。
+
+記到的 11 條:`loss`、`l1_loss`、`kld_loss`、`grad_norm`、`lr`、`update_s`、
+`dataloading_s`、`samples_per_s`、`epochs`、`episodes`、`gpu_mem_gb`。
+
 **相機對照**:轉 2 台環境 vs 4 台環境(都再加腕上),用同一份 `data/raw/`。
 ACT 預設(resnet18 + ImageNet 權重、`dim_model=512`、`n_obs_steps=1`、
 `chunk_size=100`、`use_vae=True`、`lr=1e-5`)就是好起點。
