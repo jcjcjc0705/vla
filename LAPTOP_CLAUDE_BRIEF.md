@@ -1,24 +1,81 @@
-# 簡報:給筆電上的 Claude —— 伺服器這邊的進度與兩個必須知道的修正
+# 簡報:給筆電上的 Claude —— 伺服器這邊的進度
 
 > **先讀 `SERVER_CLAUDE_BRIEF.md`。** 那份是專案的完整背景(物理參數、架構決策、
-> 每個踩過的坑),仍然有效。**這一份只寫「自從那份寫完之後,在伺服器上發生了什麼」**,
-> 以及筆電這邊該同步什麼。
+> 每個踩過的坑),仍然有效,而且**已經照下面的重構更新過了**。
+> 這一份只寫「自從那份寫完之後,在伺服器上發生了什麼」,以及筆電這邊該同步什麼。
 >
-> 日期:2026-08-07。伺服器 = `screamviolin`(140.116.82.227),RTX Pro 6000 96 GB。
+> 日期:**2026-08-10**(原 2026-08-07 版之後又加了 §0.1 與 §1c)。
+> 伺服器 = `screamviolin`(140.116.82.227),RTX Pro 6000 96 GB。
 
 ---
 
 ## 0. 一句話總結
 
-**M3 完成了**(`convert.py` → `lerobot-train --steps=200` → `eval.py` 讓手臂因 checkpoint
-而動),過程中在伺服器上發現並修掉**兩個 bug**,兩個都動到 `expert_node.py`。
-其中一個在筆電上不會發作,另一個**會**。
+**M3 與 M4 都完成了**,而且目錄結構整個重構過。按時間順序:
+
+1. **M3 走通** —— `convert.py` → `lerobot-train --steps=200` → `eval.py` 讓手臂因
+   checkpoint 而動。過程中修掉**兩個 bug**(§1),其中一個在筆電上也會發作。
+2. **場景升級** —— 五台相機 + 程序性紋理(§1b)。**先前錄的資料全部作廢。**
+3. **M4 錄完** —— 跑 500 集、成功 486 集,五台相機全存,已轉出 3 台版本(§1d)。
+4. **重構** —— `sim/` 拆掉,按職責分成四層(§0.1)。**這會影響你 pull 之後的每一條
+   指令路徑。**
+
+---
+
+## 0.1 ⚠️ 先看這個:pull 下來會發現 `sim/` 不見了
+
+2026-08-10 的重構。`sim/` 原本同時裝著建場景、專家腳本、共用函式庫三種東西,而且
+`sim/expert.py` 跟 `omx_vla_app/expert_node.py` 是**同一個狀態機的兩份抄寫**。
+
+| 舊位置 | 新位置 |
+|---|---|
+| `sim/build_scene.py` `sim/texture.py` `sim/isaac_python.sh` | `isaac/` |
+| `sim/ik.py` `sim/spawn.py` `sim/task_config.py` | `src/omx_vla_app/omx_vla_app/` |
+| `sim/expert.py` + `omx_vla_app/expert_node.py` | `src/data_collection/data_collection/expert.py`(**合併成一份**) |
+| `omx_vla_app/recorder.py` | `src/data_collection/data_collection/recorder.py` |
+| `sim/app.py` `sim/scene.py` | **刪除**(只有 `ik.py --isaac` 在用,那個模式也刪了) |
+
+**指令跟著改名:**
+
+```bash
+ros2 run omx_vla_app expert   →   ros2 run data_collection expert
+ros2 run omx_vla_app record   →   ros2 run data_collection record
+bash sim/isaac_python.sh sim/build_scene.py  →  bash isaac/isaac_python.sh isaac/build_scene.py
+```
+
+`omx_vla_app` 現在是**純函式庫,沒有 console_scripts**。`task/` 沒動。
+
+**import 三個環境統一成同一種寫法:**
+
+```python
+from omx_vla_app import task_config
+from omx_vla_app.ik import OMXKinematics
+```
+
+容器裡靠 colcon,host 上靠 `isaac_python.sh` 把 `src/omx_vla_app` 放上 `PYTHONPATH`。
+
+⚠️ **筆電 pull 之前先 `git status`。** 這次幾乎每個檔案都換了位置,有未 commit 的
+改動會撞得很難看。也要**重跑一次 colcon build**,`data_collection` 是新的 package。
+
+### 資料改從 image 抓,不再列 checkout 路徑
+
+新增 `isaac/fetch_assets.sh`,把 USD、meshes、`profile.yaml` **和 `profile.py`** 從
+`omx_bridge_image` 匯出到 `.image_cache/`(gitignored,14 MB)給 host 端 Isaac 讀。
+
+```bash
+bash isaac/fetch_assets.sh      # 筆電上第一次、以及每次 pull 新 image 之後
+```
+
+⚠️ **`task/pick_cube.task.yaml` 的 `paths` 不再列筆電/伺服器路徑。** 舊做法是每台
+機器各自 clone `omx_bridge_image` 與 `sim_real_bridge_image`,任何一份都可能跟正在跑
+的 image 不同版本 —— 症狀是「場景看起來對但數字不對」。現在候選只有兩條,而且指的是
+**同一個 image 的內容出現在兩個位置**:容器內烤在 `/`,host 上是 `.image_cache`。
 
 ---
 
 ## 1. ⚠️ 兩個修正 —— pull 之後你會拿到,先知道為什麼
 
-兩個都在 `src/omx_vla_app/omx_vla_app/expert_node.py`。**不要退掉。**
+兩個都在 `src/data_collection/data_collection/expert.py`(§0.1 重構後的位置)。**不要退掉。**
 
 ### 1.1 控制迴圈改用模擬時間,不再用 wall clock
 
@@ -68,7 +125,8 @@ if hasattr(kin, "seed"):
     kin.seed = client.joints()[:5]
 ```
 
-**為什麼:** `expert.reset()` 內部會解 IK(`sim/expert.py:76` 的 `self.kin.solve(...)`),
+**為什麼:** `expert.reset()` 內部會解 IK(`PickCubeExpert.reset()` 裡的
+`self.kin.solve(...)`),
 但種子每個 tick 重設那行在**迴圈裡面**,而 reset 在迴圈**外面**。所以規劃用的種子是
 **上一集最後一個 tick 留下的**——手臂舉在空中抓著方塊的姿態。
 
@@ -124,22 +182,75 @@ front+wrist),其餘本來就是設定驅動的。
 
 ---
 
+## 1c. `ik.py --isaac` 已刪除
+
+那個模式會開一個 `SimulationApp`、把解析解的 FK 跟模擬器自己的比對(曾驗到 0.025 mm)。
+刪掉的理由有兩個:
+
+- 它是 `sim/app.py` 與 `sim/scene.py` 唯一的使用者,而那兩支是「在 Isaac 行程內直接
+  驅動 articulation」的舊路線 —— §4.3 早就換成純 ROS 了。為了一個驗證模式養兩支
+  死程式不划算。
+- ⚠️ **它會開 Isaac 而且會碰 USD。** 使用者觀察到「每次崩潰都發生在改了當前 usd 檔
+  之後」,而那個判斷是對的:`build_scene.py --force` 在 Isaac 開著同一份 USD 時執行,
+  會讓 Isaac 掛掉。20 集完全不碰 USD 的錄製 = 0 次崩潰。
+
+**要重做這個驗證的話**,`ik.py --check` 已經在做 FK 往返(< 1 µm),URDF↔USD 的一致性
+改成偶爾人工比對即可 —— 它只有在重新產生 asset 時才會變。
+
+---
+
+## 1d. M4 錄完了:486 集
+
+```bash
+ros2 run data_collection record --ros-args -p episodes:=500 -p ik:=analytic
+```
+
+**跑 500 集、成功 486 集**(失敗的不寫,所以 `ep_00001..ep_00500` 有跳號),
+五台相機全存,`data/raw/` 約 37 GB。用 analytic 解算器 —— 它 20/20 比 moveit 的
+19/20 穩,俯仰角也固定在 89°。
+
+轉出三台相機的版本:
+
+```bash
+python3 ml/convert.py --cameras front_left,front_right,wrist --out data/lerobot_3cam
+```
+
+**486 集 / 100,096 幀 / 20 GB**,LeRobot v3.0,PNG in parquet。
+
+⚠️ **`--cameras` 是 `convert.py` 新增的參數,轉檔時才決定要哪幾台。** 五台都在
+`data/raw/` 裡,同一份 raw 可以轉出 2 台 / 3 台 / 5 台好幾個 dataset 做對照,
+**不必重錄**。這正是 §4.4「原始傾印」設計要換來的東西。
+
+**影像年齡**(486 集 × 3 相機 = 300,288 個樣本,控制週期 33.33 ms):
+
+```
+平均 3.64 ms   中位數 2.41 ms   p95 18.09 ms   p99 35.46 ms   最大 171.74 ms
+超過一個控制週期的比例   1.09%
+```
+
+比 M3 時的 19 集(平均 4.59 ms)還好一點。⚠️ **但尾巴很長** —— 最壞的那一幀用的是
+5 個控制週期以前的影像。那 1.09% 分散在 486 集裡,不成塊,所以判斷是「算繪偶爾被
+別的東西搶走」而不是某幾集壞掉。目前**不做特別處理**,`convert.py` 照 index 展開、
+不丟不插值。若 M5 發現策略在快速移動時特別不準,這是第一個要回來看的地方。
+
+---
+
 ## 2. 伺服器上已經驗證跑通的功能(逐項實跑)
 
 | 功能 | 指令 | 伺服器結果 |
 |---|---|---|
-| 設定解析 | `bash sim/isaac_python.sh sim/task_config.py` | ✅ 6 關節、路徑全解析 |
-| 建場景 | `bash sim/isaac_python.sh sim/build_scene.py` | ✅ prim 238→249,mimic 25→1000 |
-| 解析解自檢 | `sim/ik.py --check 1000` | ✅ 100%,FK 往返 < 1 µm |
-| 可達範圍 | `sim/ik.py --map` | ✅ 環帶最高懸停 **110 mm** |
-| 對 Isaac 驗運動學 | `sim/ik.py --isaac 20` | ✅ **0.025 mm**(簡報記 0.024) |
+| 設定解析 | `bash isaac/isaac_python.sh -m omx_vla_app.task_config` | ✅ 6 關節、路徑全解析 |
+| 建場景 | `bash isaac/isaac_python.sh isaac/build_scene.py` | ✅ prim 238→249,mimic 25→1000 |
+| 解析解自檢 | `python3 .../omx_vla_app/ik.py --check 1000` | ✅ 100%,FK 往返 < 1 µm |
+| 可達範圍 | `... ik.py --map` | ✅ 環帶最高懸停 **110 mm** |
+| ~~對 Isaac 驗運動學~~ | ~~`ik.py --isaac 20`~~ | 曾驗到 **0.025 mm**。⚠️ 模式已刪(見 §1c) |
 | 專家 moveit | `expert -p episodes:=20` | **19/20**,俯仰 46.1~59.1° |
 | 專家 analytic | `expert -p ik:=analytic -p episodes:=20` | **20/20**,俯仰 88.6~89.6° |
 | 專家 position_only | `expert -p ik:=position_only -p episodes:=10` | **10/10**,俯仰 36.3~44.7° |
 | 保留區取樣 | `expert -p holdout:=true -p episodes:=10` | **10/10**,θ 全落在保留帶 |
-| 階段截圖 | `expert -p save_frames:=true` | ✅ 每集 5 階段 × 2 相機 |
-| 錄製 | `record -p episodes:=20` | ✅ 19 集 / 3836 幀 |
-| 轉檔 | `python ml/convert.py` | ✅ 載得回,shape 全對 |
+| 階段截圖 | `expert -p save_frames:=true` | ✅ 每集 5 階段 × 5 相機 |
+| 錄製 | `record -p episodes:=500` | ✅ **486 集 / 100,096 幀**(M4) |
+| 轉檔 | `python ml/convert.py --cameras front_left,front_right,wrist` | ✅ 486 集、20 GB |
 | 訓練 | `lerobot-train --steps=200` | ✅ loss 23.8 → 3.38 |
 | 評估 | `python ml/eval.py --checkpoint ...` | ✅ 455 則命令、無 NaN、手臂動了 |
 | `jog` / `monitor` | `ros2 run omx_bridge_app jog sim` | ⏸ 需互動終端,伺服器上的 agent 驗不了 |
@@ -243,6 +354,16 @@ cd ../vla && docker compose --env-file docker/compose/.env \
 docker exec omx_vla bash -c 'source /workspaces/rebuild_colcon.rc'   # 第一次要 build
 ```
 
+⚠️ **compose 一個 ROS package 一條掛載,不要整包蓋 `/workspaces/src`。**
+image 是 `colcon build --symlink-install` 建的,`install/` 指到 `build/`、`build/`
+再指回 `src/`。整包蓋上去會讓 image **自己的** `sim_real_bridge` 與 `omx_bridge_app`
+變成斷掉的 symlink —— 症狀是 ImportError,看起來像 image 壞了。現在是兩條:
+`omx_vla_app` 與 `data_collection`。
+
+⚠️ **同一個 symlink 陷阱**也讓 `fetch_assets.sh` 必須從 `/workspaces/src/` 而不是
+`build/` 複製 `sim_real_bridge` —— `docker cp` 會忠實地複製那個 link,留下一個指向
+容器內路徑的斷掉指標,而且**失敗是安靜的**:目錄看起來存在,裡面什麼都沒有。
+
 ⚠️ **容器裡 `bash -lc` 不會 source `~/.bashrc`**,所以 ROS 沒被載入、`ros2` 不在 PATH。
 非互動執行一律要明寫:
 
@@ -334,33 +455,37 @@ README.md
 **`vla` repo:**
 
 ```
-ml/                                  ← 新增。訓練/推論那一層,與 sim/(Isaac 3.11)、src/(ROS) 並列
-├── convert.py                       raw dump -> LeRobotDataset
+isaac/                               ← 建場景。build_scene / texture / isaac_python
+└── fetch_assets.sh                  ← 新增。image -> .image_cache/
+ml/                                  ← 訓練驗證
+├── convert.py                       raw dump -> LeRobotDataset(新增 --cameras)
 └── eval.py                          checkpoint -> /sync/command
-src/omx_vla_app/omx_vla_app/expert_node.py   ← §1 的兩個修正 + loop_overruns 計數
-docker/compose/docker-compose-vla.yml        ← 指向 omx_vla_image + GPU reservation
-docker/compose/docker-compose-ctrl.yml       ← 新增。控制層(omx_bridge_image,numpy 1.x)
-docker/scripts/ctrl.sh                       ← 新增
-SERVER_CLAUDE_BRIEF.md                       ← 更新:§6 的 lerobot 片段、§10 的答案、§9 新增兩條
+src/data_collection/                 ← 新增的 ROS package。專家 + 錄製
+└── data_collection/expert.py        ← §1 的兩個修正 + loop_overruns;狀態機也併進來了
+src/omx_vla_app/                     ← 共用層,純函式庫(拿掉 console_scripts)
+docker/compose/docker-compose-vla.yml        ← omx_vla_image + GPU reservation + 兩條掛載
+docker/compose/docker-compose-ctrl.yml       ← 控制層(omx_bridge_image,numpy 1.x)
+docker/scripts/ctrl.sh
+SERVER_CLAUDE_BRIEF.md                       ← 已照重構更新(§2 §5 §6 §7 §8 §9 §10)
 LAPTOP_CLAUDE_BRIEF.md                       ← 這份
 ```
 
 **職責邊界**:`omx_vla_image` 只放環境(訓練本身是 `lerobot-train` CLI,不需要自己寫的
 程式碼);`vla` 放這隻手臂的知識 —— 場景與運動學、腳本專家、ROS 節點、轉檔、推論、測試。
-`convert.py` 留在 `vla`,因為它要讀 `data/raw/` 並從 `sim/task_config.py` 取關節順序
-(全鏈唯一的真相),它屬於資料層而不是訓練層。
+`convert.py` 留在 `vla`,因為它要讀 `data/raw/` 並從 `omx_vla_app/task_config.py` 取
+關節順序(全鏈唯一的真相),它屬於資料層而不是訓練層。
 
 `omx_bridge_image` **完全沒有改動**(`.env` 是 gitignored 的機器設定)。
 
 `data/` 底下(全部 gitignored):
 
 ```
-data/raw/                    19 集,目前唯一有效的資料(sim time + 種子都修好之後錄的)
-data/raw_2.42x_bad/          11 集,時序壞掉時錄的 —— 只留著對照,不要拿去訓練
-data/raw_simtime_seedbug/    17 集,時序好了但種子還沒修
-data/lerobot/                19 集 / 3836 幀的 LeRobotDataset
-outputs/act_m3/              200 步的 checkpoint
+data/raw/                    **486 集,M4 的正式資料**,五台相機,37 GB
+data/lerobot_3cam/           486 集 / 100,096 幀,front_left+front_right+wrist,20 GB
 ```
+
+(M3 時期那幾份 `raw_2.42x_bad/`、`raw_simtime_seedbug/`、19 集的 `data/lerobot/`
+與 `outputs/act_m3/` 都已清掉 —— 場景改過之後它們一律作廢,留著只會被誤用。)
 
 ⚠️ **容器以 root 執行**,所以 `record` 寫出來的檔案是 `root:root`,host 端(以及在
 host 上跑的 `convert.py`)會寫不進去。每次錄完跑一次:
@@ -383,38 +508,47 @@ docker exec omx_vla chown -R $(id -u):$(id -g) /vla/data
 ⚠️ **一個還沒解決的 domain gap:光照。** 伺服器的 Isaac 是從筆電複製過來的,
 `omni.kit.stage_templates` 這個擴充套件裡的資源路徑仍寫死
 `/home/jcjcjc/Desktop/isaac_sim_5.1/...`,所以預設 stage 的 DomeLight HDR 與一張地板
-材質**在伺服器上載不到**(每次開 Isaac 都會刷這幾行 Error,連 `ik.py --isaac` 開的
-全新行程也一樣)。算繪本身正常、有光有陰影、相機影像可用,**但兩台的光照很可能不同**。
+材質**在伺服器上載不到**(每次開 Isaac 都會刷這幾行 Error)。算繪本身正常、有光有
+陰影、相機影像可用,**但兩台的光照很可能不同**。
 
-**請在筆電上存一張 `cam_front` 的影像跟伺服器的比對** —— 併資料集之前這件事要確認。
-伺服器這邊的樣本在 `data/diag/`(用 `expert -p save_frames:=true` 產生)。
+**請在筆電上存一張 `cam_rear_right` 的影像跟伺服器的比對**(舊名 `cam_front`)——
+併資料集之前這件事要確認。用 `expert -p save_frames:=true` 產生,會寫到 `data/diag/`。
 
 ---
 
 ## 8. 現在的狀態與下一步
 
-- **M0/M1/M2/M3/M7 完成。** M3 的三個接縫都通了,而且是用**這台機器上重新錄的**
-  19 集資料走完的。
-- **M4(200 集無人值守)可以開始了** —— 但先確認 §1 兩個修正都在,不然錄出來的
-  200 集會是壞資料。專家的雜訊注入(`task/pick_cube.task.yaml` 的 `expert.noise`)
-  已經在設定裡,`record` 會直接用。
-- **沒有加任何新功能。** `ml/convert.py` 與 `ml/eval.py` 是 M3 本來就要交付的兩支,
-  其餘都是修既有行為或搬環境。
+- **M0 / M1 / M2 / M3 / M4 / M7 完成。** M4 是 486 集、五台相機、37 GB,用**重構前**的
+  程式錄的;重構後端到端重跑過一次(3 集 → 轉檔 → 訓 100 步 → eval 驅動手臂),
+  行為一致。
+- **下一步是 M5** —— 訓 ACT,然後**在保留區評估**。驗收條件是保留區成功率明顯 >0
+  且與訓練區差距不大。訓練區高、保留區接近 0 = 模型在背軌跡而不是看影像。
+- **先量 dataloader 再開大訓練。** M3 時是 2 step/s、dataloader 佔 94%,但那是 19 集
+  的數字,486 集要重量一次再決定 `num_workers` 與 `batch_size`。
 - **環境全部收進 docker,不再有 venv/conda。** 見 §5;這也讓「兩邊透過 git 同步」
   真的成立 —— 環境的定義本身進了版本控制。
 
 **往 GR00T 的方向**(使用者的最終目標,簡報 M6):
 
-- 目前 dataset 是 `use_videos=False`(PNG in parquet)、LeRobot v3.0,這是 ACT 要的。
-  **GR00T 要的是 v2 變體 + `meta/modality.json`**,而且會需要影片而不是 PNG。
-- 簡報 §4.4 的設計正是為了這件事:格式無關的 `data/raw/` 留著,換格式是**再寫一支
-  轉檔器**(或給 `convert.py` 加一個輸出模式),不是重錄。
-- 兩台相機的資料**都已經在錄**(`front` + `wrist`),M5 要跑的「只用 front」vs
-  「front + wrist」對照,資料面已經備妥。
+> ⚠️ **這一段的舊版本是錯的,已更正。** 舊版寫「GR00T 要的是 v2 變體 +
+> `meta/modality.json`,而且會需要影片而不是 PNG」——**那個落差不存在**。
+> lerobot 0.6.1 把 GR00T 包成標準 policy(`--policy.type=groot`),它的 docstring
+> 明說 dataset 載入與訓練都交給 LeRobot 的標準堆疊,模組裡也**沒有任何
+> `modality.json` 的引用**。
+
+- **ACT 與 GR00T 吃完全相同的 dataset** —— 也就是現在的 `data/lerobot_3cam/`。
+  不必再寫一支轉檔器,而且因此可以直接對照兩個模型。
+- 前置只有 `pip install 'lerobot[groot]'`。
+- ⚠️ 語言那一維在這個資料集裡是**退化的**(`task` 是常數字串,486 集全一樣)。
+  這是刻意的也是正確的 —— 使用者要的是單一物體、夾起來就算成功。常數指令正是
+  `new_embodiment` 微調的標準做法,`tune_llm=False` 的預設也剛好對應。
+  **不要**為了「看起來像 VLA」去製造指令多樣性。
 
 **已知還沒做的**(不是 bug,是待辦):
 
-1. `recorder.py` 的 image age 改用 sim time(§3.1)。
-2. 簡報 `SERVER_CLAUDE_BRIEF.md` 本身要更新:§6 的 lerobot 片段、§10 的兩個答案、
-   M7 可以簡化、§1 兩個修正該進 §9 不變條件、`--map` 的 110 vs 85。
-3. `jog` / `monitor` / `ik_target` 在伺服器上沒驗過(需要互動終端或 GUI)。
+1. `recorder.py` 的 image age 仍用 wall clock 記,而控制週期現在是 sim time。
+   只影響診斷數字的判讀,不影響資料本身。
+2. `jog` / `monitor` / `ik_target` 在伺服器上沒驗過(需要互動終端或 GUI)。
+3. `--map` 說整個環帶最高懸停 **110 mm**,但 task yaml 的註解寫「r=0.24 最高 85mm」。
+   **兩個數字對不上,請在筆電上跑一次 `--map` 對照。**
+4. 兩台的光照可能不同(§7),M8 合併資料前要比對。

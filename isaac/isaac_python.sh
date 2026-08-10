@@ -31,8 +31,20 @@ if [ -z "$USDLIBS" ]; then
   exit 1
 fi
 
-export PYTHONPATH="$USDLIBS:${PYTHONPATH:-}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname "$HERE")"
+
+# The shared layer (task_config / ik / spawn) is the omx_vla_app ROS package. In
+# the containers colcon has installed it; on the host nothing has, so put it on
+# the path here rather than in each script. That is what lets `-m
+# omx_vla_app.task_config` work identically in all three environments.
+export PYTHONPATH="$USDLIBS:$REPO_ROOT/src/omx_vla_app:${PYTHONPATH:-}"
 export LD_LIBRARY_PATH="$USDLIBS/bin:$ISAAC/kit:${LD_LIBRARY_PATH:-}"
+
+# task_config falls back to searching upward for task/pick_cube.task.yaml when
+# this is unset, but being explicit means an invocation from any cwd resolves to
+# this checkout rather than to whatever happens to be above it.
+export VLA_ROOT="${VLA_ROOT:-$REPO_ROOT}"
 
 # Unbuffered, or nothing you print survives. Redirecting stdout to a file makes
 # print() block-buffered, and SimulationApp.close() ends the process hard enough

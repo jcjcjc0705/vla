@@ -10,7 +10,7 @@
 
 ## 一句話架構
 
-> Isaac 裡放一個方塊和兩台相機,寫個腳本專家用 IK 抓幾百次錄成資料集,
+> Isaac 裡放一個方塊和五台相機,寫個腳本專家用 IK 抓幾百次錄成資料集,
 > 訓練一個只看影像的策略,最後換成 GR00T。全部在伺服器上,真手臂完全不參與。
 
 ---
@@ -46,7 +46,7 @@ NVIDIA 的 LeIsaac 配方綁 Isaac Lab 2.1 + Isaac Sim 4.5/5.0,你裝的是 5.1.
 | 項目 | 決定 |
 |---|---|
 | 成功定義 | sim 裡方塊被夾起並抬高 |
-| 相機 | 錄兩台(胸口高度 + 腕上),**訓練時再決定用哪些** |
+| 相機 | 錄五台(四台環境 + 腕上),**訓練時再決定用哪些**。已先轉出 3 台的版本 |
 | 示範來源 | 腳本專家(M8 再補人類示範,用你筆電) |
 | 模型 | 先 ACT,再 GR00T N1.7 |
 | 跑在哪 | 全在伺服器。筆電只當觀看端 |
@@ -58,13 +58,12 @@ NVIDIA 的 LeIsaac 配方綁 Isaac Lab 2.1 + Isaac Sim 4.5/5.0,你裝的是 5.1.
 ## 進度
 
 - [x] **M0** 環境查證 — ✅ **完成**,見下方
-- [x] **M1** 場景 + 兩台相機 + 夾起方塊 — ✅(關鍵是 mimic 剛度 25→1000)
+- [x] **M1** 場景 + 相機 + 夾起方塊 — ✅(關鍵是 mimic 剛度 25→1000;後來擴到五台相機)
 - [x] **M2** 腳本專家 — ✅ **moveit 20/20、analytic 20/20**
-- [ ] **M3** 走通骨架:錄 5 集 → 訓 200 步 → 手臂會動
-      — 錄製半邊已完成(`recorder.py`,筆電上已錄 3 集),
-      `convert.py` / 訓練 / `eval.py` 要 py3.12 + torch,**移到伺服器才做得了**
-- [ ] **M4** 錄 200 集(半天,無人值守)
-- [ ] **M5** 訓 ACT + **在沒看過的位置評估**
+- [x] **M3** 走通骨架:錄 → 訓 200 步 → 手臂會動 — ✅ **完成**
+- [x] **M4** 錄資料集 — ✅ **500 集跑完,486 集成功**(五台相機全存),
+      已轉出 3 台版本 `data/lerobot_3cam`(486 集 / 100,096 幀)
+- [ ] **M5** 訓 ACT + **在沒看過的位置評估** ← **現在在這裡**
 - [ ] **M6** 微調 GR00T N1.7
 - [x] **M7** 接回 `/sync/command` — ✅ 提早做掉了,專家與錄製本來就走這條
 - [ ] **M8** 人類示範(日後)
@@ -79,7 +78,7 @@ NVIDIA 的 LeIsaac 配方綁 Isaac Lab 2.1 + Isaac Sim 4.5/5.0,你裝的是 5.1.
 `ROS_DOMAIN_ID=1`,跟真 follower 同一個 DDS domain。專家發的是 `/sync/command`,
 那正是 `jog real` 用來驅動真臂的同一個 topic。
 
-真臂不動的唯一原因是 [`expert_node.py`](src/omx_vla_app/omx_vla_app/expert_node.py)
+真臂不動的唯一原因是 [`expert.py`](src/data_collection/data_collection/expert.py)
 起引擎時寫死了 `targets:=sim`。引擎只把命令轉給被指名的端點,`sim` 就只到 Isaac。
 
 **所以:改那一行之前先想清楚,而且不要在真 follower 通電時做實驗。** 這不是理論
@@ -100,25 +99,32 @@ NVIDIA 的 LeIsaac 配方綁 Isaac Lab 2.1 + Isaac Sim 4.5/5.0,你裝的是 5.1.
 
 三個附帶結論:
 
-- **不用 uv、不用 conda** — Ubuntu 24.04 內建 python3.12,`python3 -m venv` 就夠。
-  pip 的 torch wheel 自帶 CUDA runtime,**不需要裝 CUDA toolkit**。
+- **不用 uv、不用 conda、也不用 venv** — 環境全部收進 docker。ML 那層是衍生 image
+  `omx_vla_image`(`FROM omx_bridge_image` + torch cu128 + lerobot)。pip 的 torch
+  wheel 自帶 CUDA runtime,**不需要裝 CUDA toolkit**。
 - ⚠️ **Isaac 附的 `environment.yml` 釘 `cuda-toolkit=11.8`,在 Blackwell 上不能用。**
   不要拿它建 conda 環境跑 torch。
 - **ML 那層跑容器**(符合你既有做法),**Isaac 留原生**。GPU 是共用的,還有 92 GB,
   可以跟別人並存不用等。
 
-## 下一步:把 M3 的後半做完
+## 下一步:M5 —— 訓 ACT,在沒看過的位置評估
 
-筆電做得到的都做完了 —— 場景、專家、錄製都在跑。**卡住的是 `convert.py` 之後那一段,
-它要 py3.12 + torch cu128,筆電上沒有。**
+M3 的三個接縫都通了,M4 的資料也錄完了。現在手上有:
 
-移到伺服器之後的順序:
+```
+data/raw/            486 集,五台相機都存,格式無關的原始傾印
+data/lerobot_3cam/   486 集 / 100,096 幀,front_left + front_right + wrist
+```
 
-1. `convert.py`:`data/raw/` → LeRobotDataset。先拿筆電錄的那 3 集當輸入,確認
-   shape 與 `finalize()` 都對。
-2. `lerobot-train --steps=200` 跑通,再 `eval.py` 讓手臂因為 checkpoint 而動。
-   **它一定會失敗,那就是預期結果** —— 這步證的是接縫,不是效果。
-3. 才開始 M4 的 200 集。
+接下來:
+
+1. **先量 dataloader 速度再開大訓練。** M3 時量到 2 step/s、dataloader 佔 94%,
+   那是 19 集的數字;486 集要重量一次,調 `num_workers` 與 `batch_size`。
+2. `lerobot-train --policy.type=act` 跑到收斂。
+3. **`eval.py --holdout`** —— 驗收條件是保留區的成功率明顯 >0 且與訓練區差距不大。
+   訓練區高、保留區接近 0 就是「模型在背軌跡而不是看影像」,回頭加大隨機化。
+4. 相機對照:目前轉的是 3 台,同一份 `data/raw/` 可以再轉 2 台或 5 台的版本比較
+   (`ml/convert.py --cameras`),不必重錄。
 
 實作細節在 [`SERVER_CLAUDE_BRIEF.md`](SERVER_CLAUDE_BRIEF.md)。
 
@@ -164,13 +170,18 @@ torch 2.7 / CUDA 12.8,方向是對的。
 
 ## 相關路徑
 
-這個 repo 是獨立的(`github.com/jcjcjc0705/vla`),依賴另外兩個 repo 但**不含**它們:
+這個 repo 是獨立的(`github.com/jcjcjc0705/vla`),依賴另外兩個 repo 但**不含**它們。
 
-| 東西 | 筆電 | 伺服器 |
-|---|---|---|
-| 給伺服器 Claude 的簡報 | [`SERVER_CLAUDE_BRIEF.md`](SERVER_CLAUDE_BRIEF.md) | 同 |
-| Isaac 場景 / URDF / profile | `../../docker/robot/omx_bridge_image/` | `~/omx_vla/omx_bridge_image/` |
-| 同步引擎(關節順序的真相) | `../../docker/bridge/sim_real_bridge_image/` | `~/omx_vla/sim_real_bridge_image/` |
-| 相機內參換算工具 | `../../camera/cameracalibration/isaac_camera.py` | (只在筆電,不需要) |
+**這隻手臂的資料只有一個來源:`omx_bridge_image` 這個 image。** 不再列每台機器的
+checkout 路徑 —— 那個做法讓每台機器可能拿到跟正在跑的 image 不同版本的 USD,而症狀是
+「場景看起來對但數字不對」這種最難查的東西。
 
-路徑差異用 `task/pick_cube.task.yaml` 裡的設定吸收,程式碼不寫死。
+| 東西 | 從哪來 |
+|---|---|
+| USD / URDF / meshes / profile | `omx_bridge_image`。容器內烤在 `/`;host 上跑 `bash isaac/fetch_assets.sh` 匯出到 `.image_cache/` |
+| 同步引擎(關節順序的真相) | 同上。連 `profile.py` 一起匯出,不抄第二份 |
+| 訓練環境(torch + lerobot) | `omx_vla_image`,`FROM omx_bridge_image` |
+| 相機內參換算工具 | `camera/cameracalibration/isaac_camera.py`(在使用者筆電的另一個專案裡) |
+
+⚠️ `docker pull` 了新的 `omx_bridge_image` 之後要重跑 `fetch_assets.sh`。`.image_cache/`
+是複本、沒有版本標記,不會自己更新。
