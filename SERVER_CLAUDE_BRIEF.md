@@ -689,15 +689,30 @@ collider 之後,先前錄的資料就作廢**。重錄 200 集才貴,先把旋�
 > raw 可以轉出 2 台 / 3 台 / 5 台好幾個 dataset 做對照,不必重錄。
 
 ### M5 — 訓 ACT,在沒看過的位置評估 ← **現在在這裡**
-**先量再開大訓練。** M3 時是 2 step/s、dataloader 佔 94%,但那是 19 集的數字;
-486 集要重量一次再決定 `num_workers` 與 `batch_size`。
-```bash
-lerobot-train --dataset.repo_id=screamlab/omx_pick_cube \
-  --dataset.root=data/lerobot_3cam --policy.type=act --policy.push_to_hub=false \
-  --batch_size=64 --steps=60000 --num_workers=8 --output_dir=outputs/act_v1
+
+⚠️ **用 `ml/train.py`,不要用 `lerobot-train` CLI。** 已量,batch 64 / 4 workers:
+
 ```
+lerobot-train    updt_s 0.441   data_s 9.575   smp/s   6     60k 步 ≈ 7 天
+ml/train.py      updt_s 0.172   data_s 0.012   smp/s 348     60k 步 ≈ 3 小時
+```
+
+原因見 `ml/fast_chunk_patch.py`:ACT 的 100 步 action chunk 讓 lerobot 每取一個
+樣本要 decode 約 **300 張 PNG 再全部丟掉**。用 `use_videos=True` 的人不會踩到
+(影像不在 Arrow 表裡),而這個專案刻意選 PNG-in-parquet —— 正好是觸發條件。
+
+```bash
+python3 ml/train.py --dataset.repo_id=screamlab/omx_pick_cube \
+  --dataset.root=data/lerobot_3cam --policy.type=act --policy.push_to_hub=false \
+  --batch_size=64 --steps=60000 --num_workers=4 --output_dir=outputs/act_v1 \
+  --wandb.enable=false
+```
+
 ⚠️ **`--policy.push_to_hub=false` 不能省** —— 少了它 lerobot 在 `cfg.validate()`
 就會擋下來要 `repo_id`,而錯誤訊息講的是 hub,跟你在做的事看起來無關。
+
+**`num_workers=4` 就夠了。** 修好之後 `data_s` 是 0.012 s、`updt_s` 是 0.172 s,
+瓶頸完全在 GPU,加到 8 沒有變化。
 
 **相機對照**:轉 2 台環境 vs 4 台環境(都再加腕上),用同一份 `data/raw/`。
 ACT 預設(resnet18 + ImageNet 權重、`dim_model=512`、`n_obs_steps=1`、
