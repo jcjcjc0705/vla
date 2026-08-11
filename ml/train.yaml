@@ -4,7 +4,7 @@
 # ⚠️ 註解掉的是「可調,目前用預設」,不是不能用。後面標的是 lerobot 的預設值。
 # 刻意不把預設寫成生效設定 —— 那會把它們釘死,lerobot 改了預設我們不會知道。
 
-active: groot_v2
+active: groot_v3
 
 profiles:
   # 唯一實驗變數是 tune_visual。v1 保留區最好 43%,ACT 是 90%。
@@ -95,6 +95,42 @@ profiles:
     # resume: false                        # 搭 --config_path 從 checkpoint 續跑
     # cudnn_deterministic: false
     # job_name:
+
+  # ── GR00T v3:修長寬比 + 降 lr ──────────────────────────────────────────
+  # v2(tune_visual + lr 1e-4)崩到 12%。兩個獨立的原因,這一組同時處理:
+  #
+  # 1. lr。GrootConfig **沒有** backbone 專屬 lr 欄位(ACTConfig 有
+  #    optimizer_lr_backbone),所以 tune_visual 一開,400M 的預訓練視覺塔就跟動作
+  #    頭一起吃 1e-4 —— 比 ACT 給 ResNet18 的高 10 倍。證據:v2 訓練損失更低
+  #    (0.0049 vs v1 0.0082)而保留區更差,擬合更好、泛化更爛 = 災難性遺忘。
+  #    降到 1e-5,正好是 ACT 給 backbone 的量級。
+  #
+  # 2. 長寬比。GR00T 的 letter_box_transform=False,把 320x240 直接拉成 256x256
+  #    (橫 x0.80、縱 x1.067)。25mm 方塊在原圖 8x8 px,拉完變 6.4x8.5 —— 正方形
+  #    變成高比寬多 33%,而且扭曲量隨 yaw 變化。ACT 吃原尺寸,沒這問題。
+  #    lerobot_3cam_sq 是 convert.py --pad-square 補成 320x320 的版本。
+  #
+  # ⚠️ 兩個一起改,所以歸因不乾淨。長寬比那個算修 bug(把 GR00T 的輸入拉到跟 ACT
+  # 一樣公平)而不是實驗變數,但要講清楚。
+  #
+  # steps/batch 刻意跟 v2 一樣,好直接對照。
+  groot_v3:
+    dataset.repo_id: screamlab/omx_pick_cube
+    dataset.root: data/lerobot_3cam_sq
+    policy.type: groot
+    policy.base_model_path: nvidia/GR00T-N1.7-3B
+    policy.embodiment_tag: new_embodiment
+    policy.device: cuda
+    policy.push_to_hub: false
+    policy.tune_visual: true
+    policy.optimizer_lr: 1.0e-5
+    batch_size: 24
+    steps: 16000
+    save_freq: 2000
+    log_freq: 100
+    num_workers: 4
+    output_dir: outputs/groot_v3
+    tensorboard: true
 
   # ── GR00T v1:實際跑過的那組,留著對照 ──────────────────────────────────
   # 結果:保留區最好 43%(step 40000)。完整數字見 outputs/eval_sweep_result.txt
