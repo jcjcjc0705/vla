@@ -1,0 +1,96 @@
+# 訓練參數 —— 這是唯一該手改的訓練設定檔。
+#
+#     python3 ml/train.py                    # 跑 active 指到的那一組
+#     python3 ml/train.py --steps=100        # 臨時覆蓋,不用改檔
+#
+# 命令列給的一律優先。改實驗設定請改這裡,不要把長長一串旗標貼在終端 ——
+# 那樣跑過什麼參數只存在你的 shell history 裡。
+#
+# ⚠️ **key 就是 lerobot 的旗標名,直接對應。** `batch_size` -> `--batch_size`,
+# `policy.tune_visual` -> `--policy.tune_visual`。所以任何 lerobot 認得的參數都能
+# 寫在這裡,不需要改 train.py。
+
+# 要跑哪一組。改這一行就好。
+active: groot_v2
+
+profiles:
+
+  # ── GR00T v2:解凍視覺塔 ────────────────────────────────────────────────
+  # v1(60000 步、batch 8、視覺凍住)保留區最好只有 43%,而 ACT 有 90%。
+  # 這一組動的**實驗變數只有 tune_visual**,其餘兩項是修掉 v1 已知的浪費。
+  groot_v2:
+    dataset.repo_id: screamlab/omx_pick_cube
+    dataset.root: data/lerobot_3cam
+    policy.type: groot
+    policy.base_model_path: nvidia/GR00T-N1.7-3B
+    policy.embodiment_tag: new_embodiment
+    policy.device: cuda
+    policy.push_to_hub: false
+
+    # ⚠️ 這一組唯一的實驗變數。v1 是 false —— 視覺塔凍住,模型用 Cosmos-Reason2
+    # 在真實影片上學到的通用特徵去看一個 320x240 的程序紋理 sim 畫面。
+    # 對照組 ACT 的 ResNet18 有 optimizer_lr_backbone=1e-05,**會**為這個場景調整,
+    # 而它拿到 90%。這是目前對 43% 最合理的解釋。
+    policy.tune_visual: true
+
+    # v1 只用了 36 / 96 GB。這不是實驗,是修正浪費。
+    # 2026-08-11 用 --steps=30 探測過這一組,確認塞得下:
+    #     num_learnable  2.03B   (v1 是 1.62B;視覺塔 +407M)
+    #     mem_gb         61.6 / 95.6   Isaac 另佔 5 GB,還有約 28 GB 餘裕
+    #     1.18 s/step -> 16000 步約 5.2 小時
+    #     data_s         0.052   chunk 修補仍然生效
+    # ⚠️ 再往上調 batch 之前重跑一次探測。tune_visual 讓每步吃的顯存跟 batch
+    # 近似線性成長,32 有機會撞到上限。
+    batch_size: 24
+
+    # ⚠️ 兩個模型的最佳點都落在**看過約 320,000 筆樣本**的地方:
+    #     GR00T  40000 步 x 8  = 320,000 = 3.20 epoch  -> 43%(v1 最好)
+    #     ACT     5000 步 x 64 = 320,000 = 3.20 epoch  -> 90%
+    # n=2 可能是巧合,但兩邊往後都退步。24 x 16000 = 384,000 = 3.8 epoch,
+    # 略過那個點一些,好在曲線上看到峰值。
+    # v1 跑到 60000(4.8 epoch)且 lr 被 cosine 退到 9.2e-10 —— 最後一萬步空轉。
+    steps: 16000
+
+    # checkpoint 約 28 GB(模型 12 G + optimizer 狀態隨可訓參數變大到約 16 G),
+    # 8 個約 224 GB。磁碟目前 948 G,夠。
+    # 存密是因為最佳點抓不準:v1 最好的是 40000 不是 60000,ACT 最好的是 5000。
+    save_freq: 2000
+    log_freq: 100
+    num_workers: 4          # data_s 實測 0.032,4 個就夠,加到 8 沒差
+    output_dir: outputs/groot_v2
+    tensorboard: true
+
+  # ── GR00T v1:實際跑過的那組,留著對照 ──────────────────────────────────
+  # 結果:保留區最好 43%(step 40000)。完整數字見 outputs/eval_sweep_result.txt
+  groot_v1:
+    dataset.repo_id: screamlab/omx_pick_cube
+    dataset.root: data/lerobot_3cam
+    policy.type: groot
+    policy.base_model_path: nvidia/GR00T-N1.7-3B
+    policy.embodiment_tag: new_embodiment
+    policy.device: cuda
+    policy.push_to_hub: false
+    batch_size: 8
+    steps: 60000
+    save_freq: 10000
+    log_freq: 200
+    num_workers: 4
+    output_dir: outputs/groot_v1
+    tensorboard: true
+
+  # ── ACT:M5 的基準,保留區 90% ──────────────────────────────────────────
+  # step 5000 就 90%,之後反而退步(10000:50%、15000:37%、20000:77%)。
+  # 要重現的話 steps 設 6000、save_freq 1000 就夠,不需要 20000。
+  act:
+    dataset.repo_id: screamlab/omx_pick_cube
+    dataset.root: data/lerobot_3cam
+    policy.type: act
+    policy.device: cuda
+    policy.push_to_hub: false
+    batch_size: 64
+    steps: 6000
+    save_freq: 1000
+    log_freq: 200
+    num_workers: 4
+    output_dir: outputs/act_v2
+    tensorboard: true

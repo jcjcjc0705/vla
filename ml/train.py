@@ -1,13 +1,16 @@
-"""``lerobot-train`` with the chunked-action dataloader fix applied.
+"""``lerobot-train`` with the chunked-action dataloader fix and a config file.
 
-    python3 ml/train.py --dataset.repo_id=screamlab/omx_pick_cube \
-        --dataset.root=data/lerobot_3cam --policy.type=act \
-        --policy.push_to_hub=false --output_dir=outputs/act_v1 \
-        --batch_size=64 --steps=60000 --num_workers=8 --wandb.enable=false
+    python3 ml/train.py                     # 跑 ml/train.yaml 的 active 那一組
+    python3 ml/train.py --steps=100         # 臨時覆蓋一個值
+    python3 ml/train.py --profile=act       # 換一組,不用改檔
 
-**Use this instead of the ``lerobot-train`` CLI for this dataset.** Every flag is
-passed straight through -- this file adds no arguments and changes no defaults.
-The only difference is the import above ``main()``.
+**Parameters live in ``ml/train.yaml``, not in your shell history.** That file
+carries the reasoning next to each number -- why batch is 24, why steps is 16000
+-- which a pasted command line cannot. Anything on the command line still wins,
+so one-off experiments do not need an edit.
+
+**Use this instead of the ``lerobot-train`` CLI for this dataset.** Apart from
+the config file, every flag is passed straight through.
 
 Why it has to exist: see ``fast_chunk_patch``. Short version -- ACT's 100-step
 action chunk makes lerobot decode ~300 PNGs per sample and discard them. On this
@@ -45,20 +48,63 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 
 import fast_chunk_patch  # noqa: E402
 
 _CTX = "--dataloader_multiprocessing_context"
+_CONFIG = HERE / "train.yaml"
 
 
 def _has(argv, flag):
     return any(a == flag or a.startswith(flag + "=") for a in argv)
 
 
+def _profile_args(argv):
+    """``ml/train.yaml`` -> CLI 旗標,命令列已經給過的就跳過。
+
+    Keys map to lerobot flags one-to-one (``policy.tune_visual`` ->
+    ``--policy.tune_visual``), so a new knob needs a yaml line and no code.
+
+    ⚠️ Skipping what the caller already passed, rather than relying on "last one
+    wins", keeps precedence independent of how the parser resolves duplicates.
+    """
+    import yaml
+
+    if not _CONFIG.exists():
+        return argv, None
+    cfg = yaml.safe_load(_CONFIG.read_text()) or {}
+
+    name = None
+    for a in list(argv):
+        if a.startswith("--profile="):
+            name = a.split("=", 1)[1]
+            argv.remove(a)
+    name = name or cfg.get("active")
+    profiles = cfg.get("profiles") or {}
+    if name not in profiles:
+        raise SystemExit(
+            f"{_CONFIG} 裡沒有 profile '{name}'。可用的:{sorted(profiles)}")
+
+    extra = []
+    for key, val in (profiles[name] or {}).items():
+        if key == "tensorboard":
+            if val and "--tensorboard" not in argv:
+                argv.append("--tensorboard")
+            continue
+        flag = f"--{key}"
+        if _has(argv, flag):
+            continue                      # 命令列優先
+        extra.append(f"{flag}={'true' if val is True else 'false' if val is False else val}")
+    return extra + argv, name
+
+
 if __name__ == "__main__":
     fast_chunk_patch.apply()
-    argv = sys.argv[1:]
+    argv, profile = _profile_args(sys.argv[1:])
+    if profile:
+        print(f"[train] profile: {profile}  ({_CONFIG})")
 
     want_tb = "--tensorboard" in argv
     if want_tb:
