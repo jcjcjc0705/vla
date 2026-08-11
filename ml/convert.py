@@ -69,7 +69,7 @@ def episode_dirs(raw_root: Path):
     return eps
 
 
-def load_episode(ep_dir: Path, joints, cameras):
+def load_episode(ep_dir: Path, joints, cameras, pad_square=False):
     """One episode as ``(rows, meta)``, images already expanded per frame.
 
     Returns ``rows`` as a list of dicts ready for ``add_frame``.
@@ -141,7 +141,10 @@ def load_episode(ep_dir: Path, joints, cameras):
             if not path.exists():
                 raise ConvertError(f"{ep_dir.name}: 缺 {path.name}"
                                    "(frames.npz 指到不存在的影像)")
-            cache[key] = np.asarray(Image.open(path).convert("RGB"))
+            arr = np.asarray(Image.open(path).convert("RGB"))
+            if pad_square:
+                arr = _pad_to_square(arr)
+            cache[key] = arr
         return cache[key]
 
     rows = []
@@ -160,6 +163,35 @@ def load_episode(ep_dir: Path, joints, cameras):
 
     ages = np.concatenate([age[c][start:] for c in cameras])
     return rows, meta, ages
+
+
+def _pad_to_square(arr):
+    """Letterbox to a square canvas, centred, black bars.
+
+    ⚠️ **This exists because of GR00T, not because square is nicer.** Its image
+    processor resizes straight to ``image_size`` (256x256 for N1.7) with
+    ``letter_box_transform=False`` and no crop, so a 320x240 frame is *stretched*
+    -- horizontally x0.80, vertically x1.067. A square cube face arrives 33%
+    taller than wide, and the distortion varies with yaw rather than being a
+    constant offset, so the model cannot learn it away.
+
+    Measured: the 25 mm cube spans 8x8 px at 320x240 (90 deg FOV at 0.50 m gives
+    0.32 px/mm); after the stretch it is 6.4 x 8.5. That matches the observed
+    failure -- roughly the right place, wrong angle.
+
+    ACT never had this problem: it consumes 320x240 as recorded.
+
+    The cube loses a little apparent size (the canvas grows), which is the right
+    trade: the failure mode is precision and orientation, not detection.
+    """
+    h, w = arr.shape[:2]
+    if h == w:
+        return arr
+    edge = max(h, w)
+    out = np.zeros((edge, edge, arr.shape[2]), dtype=arr.dtype)
+    top, left = (edge - h) // 2, (edge - w) // 2
+    out[top:top + h, left:left + w] = arr
+    return out
 
 
 def build_features(joints, cameras, resolution):
@@ -187,6 +219,10 @@ def main(argv=None):
     ap.add_argument("--repo-id", default="screamlab/omx_pick_cube")
     ap.add_argument("--force", action="store_true", help="輸出目錄已存在就砍掉重建")
     ap.add_argument("--limit", type=int, default=0, help="只轉前 N 集(除錯用)")
+    ap.add_argument("--pad-square", action="store_true",
+                    help="影像補黑邊成正方形。⚠️ GR00T 專用 —— 它會把 320x240 直接"
+                         "拉成 256x256,方塊被壓成高比寬多 33%%,yaw 線索被扭曲。"
+                         "ACT 不需要(它吃原尺寸),所以這是另存一份而不是取代。")
     ap.add_argument("--cameras", default=None,
                     help="逗號分隔的相機子集,例如 front_left,front_right,wrist"
                          "(預設全部)。錄製時五台都存了 —— 這裡只決定要不要放進"
@@ -206,6 +242,9 @@ def main(argv=None):
     else:
         cameras = all_cameras
     resolution = tuple(cfg["cameras"]["record_resolution"])
+    if args.pad_square:
+        edge = max(resolution)
+        resolution = (edge, edge)
     fps = cfg["timing"]["fps"]
 
     raw_root = (REPO_ROOT / args.raw) if not Path(args.raw).is_absolute() \
@@ -221,6 +260,7 @@ def main(argv=None):
     print(f"out      : {out}")
     print(f"joints({len(joints)}): {', '.join(joints)}")
     print(f"cameras  : {', '.join(cameras)}  @ {resolution[0]}x{resolution[1]}"
+          + ("  (補黑邊成正方形)" if args.pad_square else "")
           + (f"  (從 {len(all_cameras)} 台選 {len(cameras)} 台)"
              if len(cameras) != len(all_cameras) else ""))
     print(f"fps      : {fps}")
@@ -245,7 +285,7 @@ def main(argv=None):
 
     total, all_ages = 0, []
     for ep_dir in eps:
-        rows, meta, ages = load_episode(ep_dir, joints, cameras)
+        rows, meta, ages = load_episode(ep_dir, joints, cameras, args.pad_square)
         for row in rows:
             ds.add_frame(row)
         ds.save_episode()
