@@ -27,8 +27,10 @@ CONTAINER=${CONTAINER:-omx_vla}
 if [ $# -gt 0 ]; then
     CKPTS="$*"
 else
+    # 數字目錄(掃描一整輪訓練)加上 best(整理後只留最好的那個)。
+    # ⚠️ 排除 last —— 它是 symlink,會把同一個 checkpoint 掃兩次。
     CKPTS=$(docker exec "$CONTAINER" bash -c \
-        "ls /vla/$RUN/checkpoints 2>/dev/null | grep -E '^[0-9]+\$' | sort")
+        "ls /vla/$RUN/checkpoints 2>/dev/null | grep -E '^([0-9]+|best)\$' | sort")
 fi
 [ -z "$CKPTS" ] && { echo "在 /vla/$RUN/checkpoints 找不到 checkpoint"; exit 1; }
 

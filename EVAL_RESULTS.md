@@ -181,6 +181,21 @@ client 訂閱 `ros.camera_topics` 全部五台,dataset 只有 `--cameras` 選的
 要讓 GR00T 的 3B 參數有意義,得換題目而不是換參數:場上多個物體、指令真的攜帶資訊
 (「夾紅色的」vs「夾藍色的」)。那時 ACT 在結構上就做不到,天花板是隨機的 33%。
 
+## checkpoint 保存狀況
+
+四個 run 各只留最好的一個,目錄改名為 `best`(釋出 496 GB)。步數仍記在
+`checkpoints/best/training_state/training_step.json`:
+
+| run | best 是哪一步 | 大小 |
+|---|---|---|
+| `act_v1` | 5000 | 591 MB |
+| `groot_v1` | 40000 | 24 GB |
+| `groot_v2` | 6000 | 27 GB |
+| `groot_v3` | 14000 | 27 GB |
+
+⚠️ `last` symlink 已移除,所以這幾個 run 不能再 `--resume`。要用就是
+`--checkpoint outputs/<run>/checkpoints/best/pretrained_model`。
+
 ## 環境
 
 Isaac Sim 5.1.0-rc.19 · lerobot 0.6.1 · torch 2.11.0+cu128 · numpy 2.2.6 · RTX PRO 6000 (96 GB)

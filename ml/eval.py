@@ -138,8 +138,15 @@ def observation(client, cfg, shapes):
     return obs
 
 
-def run_episode(client, policy, pre, post, kin, cfg, pos, yaw, max_steps, shapes):
-    """Reset, let the policy drive, score it the way the expert is scored."""
+def run_episode(client, policy, pre, post, kin, cfg, pos, yaw, max_steps, shapes,
+                rec=None):
+    """Reset, let the policy drive, score it the way the expert is scored.
+
+    ``rec`` turns on diagnostics: it writes the camera frames the policy actually
+    saw plus a per-step trace of tool and cube position. Off by default -- an
+    episode is ~450 steps x 3 cameras, so this is for looking at a handful of
+    rollouts, not for scoring runs.
+    """
     grip, succ = cfg["gripper"], cfg["success"]
     grasp_z = cfg["cube"]["size"] / 2
     period = 1.0 / cfg["timing"]["fps"]
@@ -156,6 +163,8 @@ def run_episode(client, policy, pre, post, kin, cfg, pos, yaw, max_steps, shapes
         if obs is None:
             client.wait_sim(period)
             continue
+        if rec is not None:
+            rec.tick(step, obs, client, kin)
         # ⚠️ The pipeline is not optional. In lerobot 0.6.1 normalization lives
         # in these processors, not inside the policy, so calling select_action
         # directly feeds raw radians and raw pixels into a network trained on
@@ -183,6 +192,57 @@ def run_episode(client, policy, pre, post, kin, cfg, pos, yaw, max_steps, shapes
     return False, max_steps, "逾時"
 
 
+class Rollout:
+    """Dump what the policy saw and where things actually were.
+
+    Two streams, because they answer different questions:
+
+    * **frames** -- the exact tensors handed to the policy, de-normalised back to
+      PNG. Not a screen capture: if the framing or scale is wrong (it was once --
+      a checkpoint trained on 320x320 was being fed 320x240), this is where it
+      shows.
+    * **trace** -- tool position from FK, cube pose from TF, and the gripper
+      joint, every step. Success is a thresholded outcome, so a run that fails
+      by 8 mm and one that never approaches look identical in the score;
+      the trace separates them.
+    """
+
+    def __init__(self, root, every=10):
+        self.root = Path(root)
+        self.every = every
+        self.ep = None
+
+    def start(self, i, pos, yaw):
+        self.ep = self.root / f"ep_{i:02d}"
+        (self.ep / "frames").mkdir(parents=True, exist_ok=True)
+        self.rows, self.cube0 = [], (list(map(float, pos)), float(yaw))
+
+    def tick(self, step, obs, client, kin):
+        q = client.joints()
+        tool = kin.fk(q[:5])[0]
+        cube = client.cube()
+        self.rows.append({
+            "step": step,
+            "tool": [float(v) for v in tool],
+            "cube": [float(v) for v in cube[0]] if cube is not None else None,
+            "q": [float(v) for v in q],
+        })
+        if step % self.every:
+            return
+        from PIL import Image as PILImage
+        for key, t in obs.items():
+            if "images" not in key:
+                continue
+            cam = key.rsplit(".", 1)[-1]
+            arr = (t.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+            PILImage.fromarray(arr).save(self.ep / "frames" / f"t{step:04d}_{cam}.png")
+
+    def finish(self, ok, steps, why):
+        (self.ep / "trace.json").write_text(json.dumps({
+            "success": bool(ok), "steps": int(steps), "why": why,
+            "cube_placed": self.cube0, "rows": self.rows}, ensure_ascii=False))
+
+
 def main(argv=None):
     argv = list(sys.argv if argv is None else argv)
     ap = argparse.ArgumentParser(description="用訓練好的 checkpoint 驅動手臂")
@@ -191,6 +251,10 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--holdout", action="store_true", help="只在保留區取樣")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--record", metavar="DIR", default=None,
+                    help="把 policy 實際看到的畫面與逐步軌跡寫到 DIR(診斷用,很佔空間)")
+    ap.add_argument("--frame-every", type=int, default=10,
+                    help="每幾步存一次畫面(預設 10)")
     known, rest = ap.parse_known_args(argv[1:])
 
     # ⚠️ targets:=sim is not a default, it is a guard. This machine has no real
@@ -263,12 +327,19 @@ def main(argv=None):
                 and client.prim.wait_for_isaac()):
             raise SystemExit(1)
         rng = np.random.default_rng(known.seed)
+        rec = Rollout(known.record, known.frame_every) if known.record else None
+        if rec:
+            print(f"[eval] 錄影像與軌跡 -> {known.record}(每 {known.frame_every} 步)")
         wins = 0
         for i in range(known.episodes):
             pos, yaw, r, th = sample_cube_pose(cfg, rng, known.holdout)
+            if rec:
+                rec.start(i + 1, pos, yaw)
             ok, steps, why = run_episode(
                 client, policy, pre, post, kin, cfg, pos, yaw,
-                cfg["timing"]["max_episode_steps"], shapes)
+                cfg["timing"]["max_episode_steps"], shapes, rec)
+            if rec:
+                rec.finish(ok, steps, why)
             wins += ok
             print(f"  第 {i + 1:3d} 集  r={r * 1000:.0f}mm θ={th:+.0f}° "
                   f"{'✅' if ok else '✗ '} {why} ({steps} 步)", flush=True)
