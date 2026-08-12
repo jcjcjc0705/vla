@@ -342,38 +342,89 @@ def rubik_texture(path, seed=0, cell=256):
     return path
 
 
-def eraser_texture(path, seed=0, cell=256):
-    """Blue block with a white paper sleeve across the middle.
+def gift_texture(path, seed=0, cell=256):
+    """Wrapped present: patterned red paper, cream ribbon both ways, a bow.
 
-    The sleeve is the low-frequency cue that survives downsampling.
+    ⚠️ Started life as an eraser and was renamed after looking at it in the
+    scene. A real eraser is a flat elongated block; on a 25 mm cube a white band
+    just read as "a box with a stripe". A cube with a ribbon *is* what a wrapped
+    present looks like, so the name was changed to fit the geometry rather than
+    the geometry to fit the name -- the box shape is what keeps the contact
+    physics identical to the task the expert already scores 20/20 on.
 
-    ⚠️ **Blue, not the more obvious pink.** Measured at 15 px, a pink eraser sits
-    at S=0.25 against a wood floor at S=0.28 and only ~40 deg of hue away -- it
-    would have to be segmented on brightness alone, which drifts with shadow.
-    Blue puts ~170 deg between them and roughly doubles the saturation gap, while
-    staying well clear of the Rubik's cube on edge density (14 vs 62).
+    ⚠️ **Red works here, pink would not.** A desaturated pink sits at S=0.25
+    against a wood floor at S=0.28 and ~40 deg of hue away, leaving only
+    brightness to segment on -- and brightness drifts with shadow. A saturated
+    red is a different case: the original red cube measured S=0.79 on this floor
+    and ACT found it reliably enough for 85%.
+
+    The real risk with red is the **Rubik's cube**, which has red stickers. They
+    are kept apart on edge density (a 3x3 sticker grid is ~2x the edges of a
+    ribbon cross) and on value, and the separation is measured rather than
+    assumed -- see the comparison in isaac/texture.py's tests.
     """
     rng = np.random.default_rng(seed + 33)
-    PINK = (62, 118, 200)
+    PAPER = (176, 30, 38)          # deep gift-wrap red, saturated
+    PAPER_HI = (206, 52, 58)       # subtle print pattern
+    RIBBON = (238, 232, 214)       # cream, not pure white -- reads as fabric
+    RIBBON_SH = (196, 188, 168)    # ribbon's shaded edge
     W, H = cell * CUBE_ATLAS_COLS, cell * CUBE_ATLAS_ROWS
-    im = Image.new("RGB", (W, H), PINK)
+    im = Image.new("RGB", (W, H), PAPER)
     draw = ImageDraw.Draw(im)
+
     for face in range(6):
         ox, oy = (face % CUBE_ATLAS_COLS) * cell, (face // CUBE_ATLAS_COLS) * cell
         draw.rectangle([ox, oy, ox + cell - 1, oy + cell - 1],
-                       fill=(PINK[0] - face * 3, PINK[1] - face * 2, PINK[2] - face * 2))
-        # paper sleeve -- a broad light band, placed off-centre so the face's
-        # orientation is still recoverable
-        band = cell * (0.30 + 0.05 * (face % 3))
-        y0 = oy + cell * (0.22 + 0.09 * (face % 4))
-        draw.rectangle([ox, y0, ox + cell - 1, y0 + band], fill=(246, 243, 236))
-        draw.rectangle([ox, y0, ox + cell - 1, y0 + cell * 0.02], fill=(120, 118, 112))
-        draw.rectangle([ox, y0 + band, ox + cell - 1, y0 + band + cell * 0.02],
-                       fill=(120, 118, 112))
-        # a couple of scuffs so it is not a perfectly clean synthetic block
-        for _ in range(3):
-            x = ox + int(rng.integers(0, cell)); y = oy + int(rng.integers(0, cell))
-            d = int(cell * 0.05)
-            draw.ellipse([x, y, x + d, y + d], fill=(48, 96, 170))
+                       fill=(PAPER[0] - face * 4, PAPER[1], PAPER[2]))
+        # Wrapping-paper print: a sparse diagonal lattice of small dots. Low
+        # contrast on purpose -- it should read as "patterned paper" up close and
+        # vanish into flat red at 15 px, so it never competes with the ribbon.
+        step = cell * 0.145
+        d = cell * 0.028
+        k = 0
+        y = oy + step * 0.5
+        while y < oy + cell:
+            x = ox + step * (0.5 + 0.5 * (k % 2))
+            while x < ox + cell:
+                draw.ellipse([x - d, y - d, x + d, y + d], fill=PAPER_HI)
+                x += step
+            y += step
+            k += 1
+
+        # Ribbon crossing both ways. Offset per face so the cube's orientation
+        # stays readable -- a perfectly centred cross looks identical from every
+        # side, which would put the yaw randomisation back in the blind spot the
+        # per-face marks exist to remove.
+        w = cell * 0.19
+        cx = ox + cell * (0.50 + 0.055 * ((face % 3) - 1))
+        cy = oy + cell * (0.50 + 0.055 * ((face // 3) - 0.5))
+        for x0, y0, x1, y1 in ((cx - w / 2, oy, cx + w / 2, oy + cell - 1),
+                               (ox, cy - w / 2, ox + cell - 1, cy + w / 2)):
+            draw.rectangle([x0, y0, x1, y1], fill=RIBBON)
+        # Shaded edges give the ribbon a little relief instead of looking painted
+        e = max(1, int(cell * 0.010))
+        for x in (cx - w / 2, cx + w / 2):
+            draw.rectangle([x - e, oy, x + e, oy + cell - 1], fill=RIBBON_SH)
+        for y in (cy - w / 2, cy + w / 2):
+            draw.rectangle([ox, y - e, ox + cell - 1, y + e], fill=RIBBON_SH)
+        # A crease down the middle of each ribbon run
+        draw.rectangle([cx - e * 0.5, oy, cx + e * 0.5, oy + cell - 1], fill=RIBBON_SH)
+        draw.rectangle([ox, cy - e * 0.5, ox + cell - 1, cy + e * 0.5], fill=RIBBON_SH)
+
+        # Bow on one face only -- an unambiguous "this side is up".
+        if face == 4:
+            r = cell * 0.15
+            for dx, tilt in ((-r * 0.95, -0.18), (r * 0.95, 0.18)):
+                box = [cx + dx - r, cy - r * 0.70, cx + dx + r, cy + r * 0.70]
+                draw.ellipse(box, fill=RIBBON, outline=RIBBON_SH,
+                             width=max(1, int(cell * 0.012)))
+            draw.ellipse([cx - r * 0.34, cy - r * 0.34, cx + r * 0.34, cy + r * 0.34],
+                         fill=RIBBON, outline=RIBBON_SH,
+                         width=max(1, int(cell * 0.012)))
+            # two tails
+            for dx in (-r * 0.5, r * 0.5):
+                draw.polygon([(cx + dx, cy + r * 0.3),
+                              (cx + dx * 2.2, cy + r * 1.7),
+                              (cx + dx * 1.1, cy + r * 1.7)], fill=RIBBON)
     im.save(path)
     return path
