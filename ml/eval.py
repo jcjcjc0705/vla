@@ -51,7 +51,52 @@ from omx_vla_app.ik import OMXKinematics
 from omx_vla_app.spawn import sample_cube_pose
 
 
-def observation(client, cfg):
+def image_shapes(policy):
+    """``{camera: (H, W)}`` the checkpoint was trained on.
+
+    ⚠️ **Read from the policy, never assumed.** ``convert.py --pad-square``
+    letterboxes to 320x320 for GR00T (its processor stretches a 4:3 frame to a
+    square 256x256, which shears the cube's yaw), so different checkpoints of
+    the same task legitimately want different shapes. Feeding the live 320x240
+    to a checkpoint trained on 320x320 does not crash -- it scored **0/480**,
+    every checkpoint, every seed, because the scene lands at a different scale
+    and offset than anything it saw in training. Silent, total, and it looked
+    exactly like "the model is bad".
+    """
+    out = {}
+    for key, feat in (policy.config.input_features or {}).items():
+        if "images" not in key:
+            continue
+        shape = tuple(getattr(feat, "shape", None) or feat["shape"])
+        out[key.rsplit(".", 1)[-1]] = (int(shape[1]), int(shape[2]))   # H, W
+    return out
+
+
+def _fit(arr, target_hw):
+    """Scale to fit inside ``target_hw`` keeping aspect, then centre on black.
+
+    Reproduces ``convert.py``'s letterbox for the square case and is a no-op
+    resize when the target matches the frame's aspect.
+    """
+    from PIL import Image as PILImage
+
+    th, tw = target_hw
+    h, w = arr.shape[:2]
+    if (h, w) == (th, tw):
+        return arr
+    scale = min(tw / w, th / h)
+    nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
+    if (nh, nw) != (h, w):
+        arr = np.asarray(PILImage.fromarray(arr).resize((nw, nh), PILImage.BILINEAR))
+    if (nh, nw) == (th, tw):
+        return arr
+    out = np.zeros((th, tw, arr.shape[2]), dtype=arr.dtype)
+    top, left = (th - nh) // 2, (tw - nw) // 2
+    out[top:top + nh, left:left + nw] = arr
+    return out
+
+
+def observation(client, cfg, shapes):
     """The policy's input: images and joint state, and nothing else.
 
     ⚠️ The cube's pose is deliberately absent. The whole point of the project is
@@ -66,7 +111,16 @@ def observation(client, cfg):
     q = client.joints()
     frames = client.frames()
     obs = {"observation.state": torch.from_numpy(q.astype(np.float32))}
-    for name, got in frames.items():
+    default = tuple(cfg["cameras"]["record_resolution"])[::-1]      # (H, W)
+    # ⚠️ Only the cameras the checkpoint was trained on. The client subscribes to
+    # all five in ``ros.camera_topics``; the dataset holds whichever subset
+    # ``convert.py --cameras`` selected. Passing the extras used to be merely
+    # wasteful -- every camera was resized to the same shape, so the policy's
+    # stack still worked. Once --pad-square made the trained three 320x320 and
+    # left the other two at 240x320, the same code died in np.stack with
+    # "all input arrays must have the same shape".
+    for name in (shapes or {k: default for k in frames}):
+        got = frames.get(name)
         if got is None:
             return None                      # no image yet -- caller waits
         msg, _ = got
@@ -75,11 +129,7 @@ def observation(client, cfg):
             arr = arr.reshape(msg.height, msg.width, -1)[:, :, :3]
         except ValueError:
             return None                      # partial frame
-        want = tuple(cfg["cameras"]["record_resolution"])
-        if (arr.shape[1], arr.shape[0]) != want:
-            from PIL import Image as PILImage
-            arr = np.asarray(PILImage.fromarray(arr).resize(
-                want, PILImage.BILINEAR))
+        arr = _fit(arr, shapes.get(name, default))
         # CHW float in [0,1] -- what LeRobotDataset hands the trainer, so the
         # normalizer's MEAN_STD statistics are in those units. Feeding uint8
         # here is silent train/serve skew: it runs, the numbers are wrong.
@@ -88,7 +138,7 @@ def observation(client, cfg):
     return obs
 
 
-def run_episode(client, policy, pre, post, kin, cfg, pos, yaw, max_steps):
+def run_episode(client, policy, pre, post, kin, cfg, pos, yaw, max_steps, shapes):
     """Reset, let the policy drive, score it the way the expert is scored."""
     grip, succ = cfg["gripper"], cfg["success"]
     grasp_z = cfg["cube"]["size"] / 2
@@ -102,7 +152,7 @@ def run_episode(client, policy, pre, post, kin, cfg, pos, yaw, max_steps):
     policy.reset()                            # clears the action chunk queue
     held = 0
     for step in range(max_steps):
-        obs = observation(client, cfg)
+        obs = observation(client, cfg, shapes)
         if obs is None:
             client.wait_sim(period)
             continue
@@ -189,6 +239,11 @@ def main(argv=None):
         preprocessor_overrides={"device_processor": {"device": known.device}},
     )
 
+    shapes = image_shapes(policy)
+    want = sorted(set(shapes.values()))
+    print(f"[eval] checkpoint 期望的影像尺寸 (H,W): {want}"
+          + ("  ← 補邊版" if want and want[0][0] == want[0][1] else ""))
+
     executor = SingleThreadedExecutor()
     executor.add_node(engine)
     executor.add_node(client)
@@ -213,7 +268,7 @@ def main(argv=None):
             pos, yaw, r, th = sample_cube_pose(cfg, rng, known.holdout)
             ok, steps, why = run_episode(
                 client, policy, pre, post, kin, cfg, pos, yaw,
-                cfg["timing"]["max_episode_steps"])
+                cfg["timing"]["max_episode_steps"], shapes)
             wins += ok
             print(f"  第 {i + 1:3d} 集  r={r * 1000:.0f}mm θ={th:+.0f}° "
                   f"{'✅' if ok else '✗ '} {why} ({steps} 步)", flush=True)
