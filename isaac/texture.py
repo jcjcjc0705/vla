@@ -279,8 +279,12 @@ def cube_face_uvs():
 # 三者在「明度 / 飽和 / 空間頻率」三個軸上互相分開,不依賴單一線索。
 
 def dice_texture(path, seed=0, cell=256):
-    """White die, black pips, faces 1-6 in the standard opposite-sums-to-7 layout."""
-    rng = np.random.default_rng(seed + 11)
+    """White die, black pips, faces 1-6 in the standard opposite-sums-to-7 layout.
+
+    ⚠️ No ``seed`` use on purpose -- a die's pip layout is not a free parameter.
+    The argument stays for signature parity with the other generators so
+    build_scene can call them all the same way.
+    """
     W, H = cell * CUBE_ATLAS_COLS, cell * CUBE_ATLAS_ROWS
     im = Image.new("RGB", (W, H), (242, 240, 235))
     draw = ImageDraw.Draw(im)
