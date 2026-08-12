@@ -53,6 +53,9 @@ sys.path.insert(0, str(REPO_ROOT / "src" / "omx_vla_app"))
 
 from omx_vla_app import task_config  # noqa: E402
 
+# Fallback only. The three-object recordings carry a per-episode instruction in
+# meta.json; this is what the older single-cube dumps get, and it matches the
+# constant string they were recorded with.
 TASK_STRING = "pick up the cube"
 
 
@@ -147,6 +150,7 @@ def load_episode(ep_dir: Path, joints, cameras, pad_square=False):
             cache[key] = arr
         return cache[key]
 
+    task_string = meta.get("instruction", TASK_STRING)
     rows = []
     for t in range(start, n):
         row = {
@@ -155,7 +159,11 @@ def load_episode(ep_dir: Path, joints, cameras, pad_square=False):
             # would teach an identity map: high training scores, no behaviour.
             "observation.state": state[t].astype(np.float32),
             "action": action[t].astype(np.float32),
-            "task": TASK_STRING,
+            # ⚠️ Per **episode**, not a constant. This is the column GR00T
+            # reads and ACT ignores (modeling_act.py has no language path at
+            # all), so getting it from the dump rather than hard-coding it here
+            # is what makes the two comparable on the same dataset.
+            "task": task_string,
         }
         for cam in cameras:
             row[f"observation.images.{cam}"] = image(cam, idx[cam][t])
@@ -219,6 +227,10 @@ def main(argv=None):
     ap.add_argument("--repo-id", default="screamlab/omx_pick_cube")
     ap.add_argument("--force", action="store_true", help="輸出目錄已存在就砍掉重建")
     ap.add_argument("--limit", type=int, default=0, help="只轉前 N 集(除錯用)")
+    ap.add_argument("--task", default=None, metavar="YAML",
+                    help="改用別的任務規格。⚠️ 舊的單物體 raw 是 320x240 五台相機錄的,"
+                         "要轉就配 task/pick_cube_1obj.task.yaml —— 解析度與相機清單"
+                         "都是從 task yaml 讀的,不是從 raw 推的。")
     ap.add_argument("--pad-square", action="store_true",
                     help="影像補黑邊成正方形。⚠️ GR00T 專用 —— 它會把 320x240 直接"
                          "拉成 256x256,方塊被壓成高比寬多 33%%,yaw 線索被扭曲。"
@@ -229,7 +241,9 @@ def main(argv=None):
                          "這份 dataset,同一份 raw 可以轉出好幾個子集比較。")
     args = ap.parse_args(argv)
 
-    cfg = task_config.load()
+    cfg = task_config.load(Path(args.task)) if args.task else task_config.load()
+    if args.task:
+        print(f"task 規格 : {args.task}")
     joints = list(cfg.joints)
     all_cameras = list(cfg["ros"]["camera_topics"])
     if args.cameras:
@@ -283,9 +297,11 @@ def main(argv=None):
         use_videos=False,
     )
 
-    total, all_ages = 0, []
+    total, all_ages, tasks = 0, [], {}
     for ep_dir in eps:
         rows, meta, ages = load_episode(ep_dir, joints, cameras, args.pad_square)
+        if rows:
+            tasks[rows[0]["task"]] = tasks.get(rows[0]["task"], 0) + 1
         for row in rows:
             ds.add_frame(row)
         ds.save_episode()
@@ -302,6 +318,16 @@ def main(argv=None):
     ages = ages[~np.isnan(ages)]
     period = 1.0 / fps
     print(f"\n寫出 {len(eps)} 集 / {total} 幀 -> {out}")
+    if len(tasks) > 1:
+        print("指令分布:")
+        for t, c in sorted(tasks.items()):
+            print(f"  {c:4d} 集  {t!r}")
+    else:
+        # ⚠️ One distinct instruction means the language dimension is degenerate
+        # -- fine for the single-object task, a silent bug for the three-object
+        # one, and impossible to spot later from the dataset alone.
+        print(f"⚠️ 只有一種指令 {next(iter(tasks))!r} —— "
+              "語言那一維是常數,GR00T 讀不到任何資訊")
     if len(ages):
         stale = float((ages > period).mean()) * 100
         print(f"影像年齡: 平均 {ages.mean() * 1000:.2f} ms  最大 "

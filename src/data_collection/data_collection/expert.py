@@ -44,7 +44,7 @@ from omx_bridge_app import ros_args
 from omx_bridge_app.isaac_prim import IsaacPrim, IsaacPrimError
 from omx_vla_app import task_config
 from omx_vla_app.ik import OMXKinematics
-from omx_vla_app.spawn import sample_cube_pose
+from omx_vla_app.spawn import instruction_for, sample_cube_pose, sample_scene
 
 from .recorder import Recorder
 
@@ -246,14 +246,21 @@ class ExpertClient(Node):
         self.profile = profile
         self.cfg = cfg
         ros = cfg["ros"]
-        self.cube_frame = ros["cube_frame"]
-        self.cube_prim = f"{cfg.task_root}/cube"
+        # ⚠️ Works against both scenes. The three-object task lists them under
+        # `objects`; the frozen single-cube spec (task/pick_cube_1obj.task.yaml,
+        # which the M5/M6 checkpoints were trained against) has no such key and
+        # falls back to the one frame it does name. Keeping one code path means
+        # the old models stay evaluable without a git checkout.
+        self.object_keys = ([o["key"] for o in cfg["objects"]]
+                            if "objects" in cfg.raw else [ros["cube_frame"]])
+        self.object_prims = {k: f"{cfg.task_root}/{k}" for k in self.object_keys}
+        self.target = self.object_keys[0]      # set per episode by place_objects
         self.prim = IsaacPrim(self, ros["get_attribute_service"],
                               ros["set_attribute_service"])
 
         self._q = None
         self._sim_t = None                     # the twin's clock -- see wait_sim
-        self._cube = None                      # (position, yaw)
+        self._objs = {}                        # key -> (position, yaw)
         self._frames_seen = set()
         self._warned_yaw = False
         self.place_retries = 0
@@ -301,11 +308,11 @@ class ExpertClient(Node):
     def _on_tf(self, msg):
         for t in msg.transforms:
             self._frames_seen.add(t.child_frame_id)
-            if t.child_frame_id != self.cube_frame:
+            if t.child_frame_id not in self.object_prims:
                 continue
             p, r = t.transform.translation, t.transform.rotation
-            self._cube = (np.array([p.x, p.y, p.z]),
-                          2.0 * math.atan2(float(r.z), float(r.w)))
+            self._objs[t.child_frame_id] = (np.array([p.x, p.y, p.z]),
+                                            2.0 * math.atan2(float(r.z), float(r.w)))
 
     def _on_image(self, msg, name):
         # Arrival time, not msg.header.stamp: Isaac stamps images with
@@ -351,12 +358,23 @@ class ExpertClient(Node):
             "Isaac 開了嗎?Play 按了嗎?ROS_DOMAIN_ID 跟 Isaac 一致嗎?")
 
     def wait_for_cube(self, timeout=15.0):
+        """Block until **every** object has been seen on TF.
+
+        ⚠️ Waiting for all of them, not the first: a scene rebuilt with only
+        some of the objects publishes a partial tree, and an episode that starts
+        anyway would place a distractor it can never read back -- which surfaces
+        much later as an unexplained placement failure.
+        """
+        want = set(self.object_keys)
         ok = self._wait(
-            lambda: self._cube, timeout,
-            f"「{self.cfg['ros']['cube_tf_topic']}」上的 {self.cube_frame} frame",
-            "場景要是 vla/assets/pick_cube.usd(只有它帶方塊的 TF 節點)。")
-        if not ok and self._frames_seen:
-            print(f"          該 topic 上看到的 frame:{sorted(self._frames_seen)}")
+            lambda: want <= set(self._objs), timeout,
+            f"「{self.cfg['ros']['cube_tf_topic']}」上的 {', '.join(sorted(want))} frame",
+            "場景要是 vla/assets/pick_cube.usd(只有它帶物體的 TF 節點)。")
+        if not ok:
+            missing = sorted(want - set(self._objs))
+            print(f"          缺少的 frame:{missing}")
+            if self._frames_seen:
+                print(f"          該 topic 上看到的:{sorted(self._frames_seen)}")
         return ok
 
     def wait_sim(self, dt, timeout=5.0):
@@ -422,8 +440,20 @@ class ExpertClient(Node):
         gi = self.profile.joints.index(self.cfg["gripper"]["joint"])
         return float(self._mimic + self._q[gi])      # multiplier -1 -> sum is 0
 
-    def cube(self):
-        return None if self._cube is None else (self._cube[0].copy(), self._cube[1])
+    def cube(self, key=None):
+        """Pose of one object. Defaults to **this episode's target**.
+
+        ⚠️ Defaulting to the target rather than to a fixed name is what keeps
+        `run_episode` and `eval.py` unchanged: they ask "where is the thing I am
+        supposed to pick up", and with one object on the table that is the same
+        question as before.
+        """
+        got = self._objs.get(key or self.target)
+        return None if got is None else (got[0].copy(), got[1])
+
+    def objects(self):
+        """Every object's pose -- for the recorder, which logs all of them."""
+        return {k: (v[0].copy(), v[1]) for k, v in self._objs.items()}
 
     def send(self, canonical):
         msg = JointState()
@@ -467,28 +497,29 @@ class ExpertClient(Node):
             time.sleep(0.05)
         return False
 
-    def _write_pose(self, position, yaw):
-        """Write the cube's pose. Returns False if Isaac refused the write."""
+    def _write_pose(self, key, position, yaw):
+        """Write one object's pose. Returns False if Isaac refused the write."""
+        prim = self.object_prims[key]
         try:
-            self.prim.set(self.cube_prim, "xformOp:translate",
+            self.prim.set(prim, "xformOp:translate",
                           [float(v) for v in position])
         except IsaacPrimError as exc:
-            print(f"      ! 寫入方塊位置失敗:{exc}")
+            print(f"      ! 寫入 {key} 位置失敗:{exc}")
             return False
         try:
-            self.prim.set(self.cube_prim, "xformOp:orient",
+            self.prim.set(prim, "xformOp:orient",
                           [math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)])
         except IsaacPrimError as exc:
             # Position is what the episode needs; yaw only varies how the cube is
             # presented. Losing it silently would quietly narrow the dataset, so
             # say so, once, and carry on.
             if not self._warned_yaw:
-                print(f"      ! 方塊 yaw 設不了({exc}) —— 位置有效,朝向固定")
+                print(f"      ! {key} 的 yaw 設不了({exc}) —— 位置有效,朝向固定")
                 self._warned_yaw = True
         return True
 
-    def _wait_placed(self, position, settle, still_tol):
-        """Did the cube arrive and stop moving?
+    def _wait_placed(self, placements, settle, still_tol):
+        """Did **every** object arrive and stop moving?
 
         Checked through TF rather than trusted: a write that quietly does nothing
         leaves the cube where the last episode left it, which reads as a policy
@@ -497,43 +528,69 @@ class ExpertClient(Node):
         property actually wanted.
         """
         deadline = time.monotonic() + settle
-        arrived = False
-        last = None
+        arrived, last = {}, {}
         while time.monotonic() < deadline:
             time.sleep(0.1)
-            here = self.cube()
-            if here is None:
-                continue
-            if not arrived:
-                if np.linalg.norm(here[0][:2] - np.asarray(position)[:2]) < 5e-3:
-                    arrived, last = True, None
-                continue
-            if last is not None and np.linalg.norm(here[0] - last) < still_tol:
+            for key, want in placements.items():
+                here = self.cube(key)
+                if here is None:
+                    continue
+                if key not in arrived:
+                    if np.linalg.norm(here[0][:2] - np.asarray(want[0])[:2]) < 5e-3:
+                        arrived[key] = True
+                    continue
+                prev = last.get(key)
+                if prev is not None and np.linalg.norm(here[0] - prev) < still_tol:
+                    arrived[key] = "still"
+                last[key] = here[0]
+            if len(arrived) == len(placements) and all(
+                    v == "still" for v in arrived.values()):
                 return True
-            last = here[0]
-        return arrived
+        return len(arrived) == len(placements)
 
-    def place_cube(self, position, yaw, settle=2.0, still_tol=1e-4, attempts=3):
-        """Teleport the cube where the episode wants it, retrying if it does not go.
+    def place_objects(self, placements, target=None, settle=2.0,
+                      still_tol=1e-4, attempts=3):
+        """Teleport every object where the episode wants it.
+
+        ``placements`` is ``{key: (position, yaw)}``; ``target`` names the object
+        this episode is about and becomes what bare ``cube()`` returns.
 
         ⚠️ The write occasionally does not take -- about 1 episode in 20, root
         cause unconfirmed, most likely a race between the service applying the
-        USD edit and PhysX owning the body. Retrying means **re-issuing the
+        USD edit and PhysX owning the body. Retrying means **re-issuing every
         write**, not waiting longer: the failure is the write not landing.
+
+        ⚠️ All objects are re-placed every episode, including ones that did not
+        move. A distractor left where the previous episode's arm nudged it makes
+        the clutter distribution drift over a long recording -- slowly, and in a
+        way nothing would flag.
         """
+        if target is not None:
+            self.target = target
         for attempt in range(1, attempts + 1):
-            if self._write_pose(position, yaw) and self._wait_placed(
-                    position, settle, still_tol):
+            wrote = all(self._write_pose(k, p, y) for k, (p, y) in placements.items())
+            if wrote and self._wait_placed(placements, settle, still_tol):
                 self.place_retries += attempt - 1
                 if attempt > 1:
-                    print(f"      · 方塊第 {attempt} 次嘗試才放到位")
+                    print(f"      · 物體第 {attempt} 次嘗試才放到位")
                 return True
         self.place_retries += attempts - 1
         return False
 
+    def place_cube(self, position, yaw, **kw):
+        """Single-object shim -- what the frozen 1-object task and eval.py call."""
+        return self.place_objects({self.object_keys[0]: (position, yaw)},
+                                  target=self.object_keys[0], **kw)
 
-def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
-    """Reset, run the state machine, return (success, phase, ticks)."""
+
+def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None,
+                placements=None, target=None):
+    """Reset, run the state machine, return (success, phase, ticks).
+
+    ``placements``/``target`` carry the multi-object scene. Without them this is
+    the single-object task unchanged, which is what keeps the frozen
+    ``pick_cube_1obj`` spec working off the same code.
+    """
     grip = cfg["gripper"]
     succ = cfg["success"]
     grasp_z = cfg["cube"]["size"] / 2
@@ -541,7 +598,9 @@ def run_episode(client, expert, kin, cfg, pos, yaw, snap=None, rec=None):
 
     client.go_home(grip["open"])
     client.wait_for_release()
-    if not client.place_cube(pos, yaw):
+    placed = (client.place_objects(placements, target=target) if placements
+              else client.place_cube(pos, yaw))
+    if not placed:
         here = client.cube()
         print(f"      ✗ 方塊沒有到位:目標 {np.round(pos, 3)},"
               f" 實際 {np.round(here[0], 3) if here else '讀不到'}")
@@ -705,7 +764,12 @@ def main(argv=None, record=False):
         rng = np.random.default_rng(seed)
         wins, fails, residuals, lags, geoms = 0, {}, [], [], []
         for i in range(episodes):
-            pos, yaw, r, th = sample_cube_pose(cfg, rng, holdout)
+            placements = target = None
+            if "objects" in cfg.raw:
+                placements, target, r, th = sample_scene(cfg, rng, holdout)
+                pos, yaw = placements[target]
+            else:
+                pos, yaw, r, th = sample_cube_pose(cfg, rng, holdout)
             if fixed_theta < 900.0:            # 重現某個特定位置
                 th = fixed_theta
                 r = fixed_radius or r
@@ -714,13 +778,24 @@ def main(argv=None, record=False):
                                 cfg["cube"]["size"] / 2])
             snap = f"ep{i + 1:02d}_r{r * 1000:.0f}_t{th:+.0f}" if save_frames else None
             if rec is not None:
-                rec.begin(i + 1, {"seed": seed, "episode": i + 1,
-                                  "holdout": bool(holdout),
-                                  "cube": {"r": float(r), "theta_deg": float(th),
-                                           "yaw_rad": float(yaw),
-                                           "requested": [float(v) for v in pos]}})
+                meta = {"seed": seed, "episode": i + 1, "holdout": bool(holdout),
+                        "cube": {"r": float(r), "theta_deg": float(th),
+                                 "yaw_rad": float(yaw),
+                                 "requested": [float(v) for v in pos]}}
+                if placements:
+                    # ⚠️ The instruction and the target key go in the dump, not
+                    # just the target's pose. convert.py turns the instruction
+                    # into the dataset's `task` column, and without the key
+                    # there is no way to score "did it pick the right one"
+                    # after the fact.
+                    meta["target"] = target
+                    meta["instruction"] = instruction_for(cfg, target)
+                    meta["objects"] = {k: {"requested": [float(v) for v in q[0]],
+                                           "yaw_rad": float(q[1])}
+                                       for k, q in placements.items()}
+                rec.begin(i + 1, meta)
             ok, phase, ticks, residual, lag, geom = run_episode(
-                client, expert, kin, cfg, pos, yaw, snap, rec)
+                client, expert, kin, cfg, pos, yaw, snap, rec, placements, target)
             geoms.append(geom)
             if rec is not None:
                 rec.end(ok)
@@ -731,7 +806,8 @@ def main(argv=None, record=False):
                 residuals.append(residual)
             if not ok:
                 fails[PHASE_NAMES[phase]] = fails.get(PHASE_NAMES[phase], 0) + 1
-            print(f"  第 {i + 1:3d} 集  r={r * 1000:.0f}mm θ={th:+.0f}° "
+            tag = f" [{target}]" if target else ""
+            print(f"  第 {i + 1:3d} 集{tag}  r={r * 1000:.0f}mm θ={th:+.0f}° "
                   f"{'✅' if ok else '✗ '} 停在「{PHASE_NAMES[phase]}」 {ticks} 個週期"
                   f"   夾合時落後 {lag * 1000:.1f}mm",
                   flush=True)
