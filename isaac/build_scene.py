@@ -360,7 +360,12 @@ def add_cube_tf_nodes(stage, cfg, report):
         report.append(f"FAIL  找不到 {graph} —— sublayer 沒帶進 ActionGraph")
         return False
     tick = Sdf.Path(f"{graph}/on_playback_tick.outputs:tick")
-    cube = f"{cfg.task_root}/cube"
+    # ⚠️ One publisher, several targets -- `inputs:targetPrims` is a list, and
+    # each prim goes out under its own name as the child frame. Three separate
+    # publisher nodes would work too, but they would each re-walk the stage and
+    # add three times the per-tick cost of the one thing already implicated in
+    # Isaac's periodic crash (see `cameras:` in the task yaml).
+    targets = [f"{cfg.task_root}/{o['key']}" for o in cfg["objects"]]
 
     pub = stage.DefinePrim(f"{graph}/ros2_publish_cube_tf", "OmniGraphNode")
     pub.CreateAttribute("node:type", Sdf.ValueTypeNames.Token).Set(
@@ -371,7 +376,8 @@ def add_cube_tf_nodes(stage, cfg, report):
         Sdf.Path(f"{graph}/isaac_read_simulation_time.outputs:simulationTime"))
     pub.CreateAttribute("inputs:topicName", Sdf.ValueTypeNames.String).Set(
         cfg["ros"]["cube_tf_topic"])
-    pub.CreateRelationship("inputs:targetPrims").SetTargets([Sdf.Path(cube)])
+    pub.CreateRelationship("inputs:targetPrims").SetTargets(
+        [Sdf.Path(t) for t in targets])
     pub.CreateAttribute("ui:nodegraph:node:pos", Sdf.ValueTypeNames.Float2).Set(
         Gf.Vec2f(631.0, 120.0))
 
@@ -404,7 +410,7 @@ def add_cube_tf_nodes(stage, cfg, report):
         Gf.Vec2f(631.0, 260.0))
 
     report.append(f"  ok  {graph}/ros2_publish_cube_tf -> {cfg['ros']['cube_tf_topic']}"
-                  f" ({cfg['ros']['cube_frame']})")
+                  f"  frames: {', '.join(o['key'] for o in cfg['objects'])}")
     report.append(f"  ok  {graph}/ros2_service_prim    -> get/set_prim_attribute")
     return True
 
@@ -526,8 +532,6 @@ def build(cfg: task_config.Config, force: bool) -> int:
             str(tex_dir / "table.png"), seed=tspec["seed"],
             base=tuple(tbl["base_color"]), contrast=tbl["contrast"],
             speckles=tbl["speckles"], speckle_radius=tuple(tbl["speckle_radius"]))
-    texture.cube_texture(str(tex_dir / "cube.png"), seed=tspec["seed"])
-
     table_mat = define_textured_material(
         stage, f"{task_root}/Looks/table", "textures/table.png")
     define_table(stage, f"{task_root}/table", tspec["table"], table_mat)
@@ -535,14 +539,39 @@ def build(cfg: task_config.Config, force: bool) -> int:
     material = define_physics_material(
         stage, f"{task_root}/PhysicsMaterials/cube", cfg["cube"]
     )
-    cube_mat = define_textured_material(
-        stage, f"{task_root}/Looks/cube", "textures/cube.png", roughness=0.55)
-    cube = define_cube(stage, f"{task_root}/cube", cfg["cube"], material,
-                       uvs=texture.cube_face_uvs())
-    # The visual binding is separate from the physics one above -- that goes on
-    # the "physics" purpose, this on the default, so they do not displace
-    # each other.
-    UsdShade.MaterialBindingAPI(cube.GetPrim()).Bind(cube_mat)
+
+    # ── the three objects ──────────────────────────────────────────────
+    # ⚠️ **Three objects, one physics spec.** Every entry in `objects` is the
+    # same box from `cube:` -- same size, mass, friction, collider, and the same
+    # physics material instance. Only the texture and the name differ.
+    #
+    # That is the point of the task: the instruction names an object, and the
+    # only way to tell them apart on camera is the surface pattern. Three
+    # coloured cubes would let a policy pass by finding the reddest pixels,
+    # which is not language grounding. It also keeps the contact geometry
+    # identical to the single-cube task the expert already scores 20/20 on --
+    # this round changes the task, not the physics.
+    #
+    # The row layout is only so the generated stage opens with all three
+    # visible; every episode overwrites the poses through the prim service.
+    uvs = texture.cube_face_uvs()
+    for i, ospec in enumerate(cfg["objects"]):
+        key = ospec["key"]
+        gen = getattr(texture, f"{ospec['texture']}_texture", None)
+        if gen is None:
+            print(f"FAIL  texture.py 沒有 {ospec['texture']}_texture()")
+            return 1
+        gen(str(tex_dir / f"{key}.png"), seed=tspec["seed"])
+        omat = define_textured_material(
+            stage, f"{task_root}/Looks/{key}", f"textures/{key}.png", roughness=0.55)
+        obj = define_cube(stage, f"{task_root}/{key}", cfg["cube"], material, uvs=uvs)
+        UsdGeom.Xformable(obj).GetOrderedXformOps()[0].Set(
+            Gf.Vec3d(0.21, 0.10 - 0.10 * i, cfg["cube"]["size"] / 2))
+        # The visual binding is separate from the physics one above -- that goes
+        # on the "physics" purpose, this on the default, so they do not displace
+        # each other.
+        UsdShade.MaterialBindingAPI(obj.GetPrim()).Bind(omat)
+        print(f"  ok  {task_root}/{key}  <- textures/{key}.png")
 
     # One prim per entry in `ros.camera_topics` -- that dict is the camera list,
     # here and in the recorder, the converter and eval.py. A camera with a
@@ -616,7 +645,8 @@ def build(cfg: task_config.Config, force: bool) -> int:
     if deps != [rel]:
         print(f"FAIL  外部相依應該只有 {rel}")
         ok = False
-    for must in [f"{task_root}/cube", *camera_paths.values()]:
+    wanted = [f"{task_root}/{o['key']}" for o in cfg["objects"]]
+    for must in [*wanted, *camera_paths.values()]:
         if not check.GetPrimAtPath(must).IsValid():
             print(f"FAIL  少了 {must}")
             ok = False
