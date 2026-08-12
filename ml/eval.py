@@ -48,7 +48,7 @@ from data_collection.expert import ExpertClient
 from omx_bridge_app import ros_args
 from omx_vla_app import task_config
 from omx_vla_app.ik import OMXKinematics
-from omx_vla_app.spawn import sample_cube_pose
+from omx_vla_app.spawn import instruction_for, sample_cube_pose, sample_scene
 
 
 def image_shapes(policy):
@@ -139,7 +139,7 @@ def observation(client, cfg, shapes):
 
 
 def run_episode(client, policy, pre, post, kin, cfg, pos, yaw, max_steps, shapes,
-                rec=None):
+                rec=None, placements=None, target=None):
     """Reset, let the policy drive, score it the way the expert is scored.
 
     ``rec`` turns on diagnostics: it writes the camera frames the policy actually
@@ -153,8 +153,10 @@ def run_episode(client, policy, pre, post, kin, cfg, pos, yaw, max_steps, shapes
 
     client.go_home(grip["open"])
     client.wait_for_release()
-    if not client.place_cube(pos, yaw):
-        return False, 0, "方塊沒有到位"
+    placed = (client.place_objects(placements, target=target) if placements
+              else client.place_cube(pos, yaw))
+    if not placed:
+        return False, 0, "物體沒有到位"
 
     policy.reset()                            # clears the action chunk queue
     held = 0
@@ -182,13 +184,27 @@ def run_episode(client, policy, pre, post, kin, cfg, pos, yaw, max_steps, shapes
         if cube is None:
             continue
         tool = kin.fk(client.joints()[:5])[0]
-        if (cube[0][2] > grasp_z + succ["lift_height"]
-                and np.linalg.norm(cube[0] - tool) < succ["max_ee_distance"]):
+        lifted = (cube[0][2] > grasp_z + succ["lift_height"]
+                  and np.linalg.norm(cube[0] - tool) < succ["max_ee_distance"])
+        if lifted:
             held += 1
             if held >= succ["hold_steps"]:
                 return True, step, "成功"
         else:
             held = 0
+            # ⚠️ **Picking up the wrong object is a failure, and a different one
+            # from not picking anything up.** With three objects on the table a
+            # policy that ignores the instruction still lifts something a third
+            # of the time; scoring "did it lift" would hand it 33% for free and
+            # hide exactly the behaviour this task exists to measure.
+            if placements:
+                for key, got in client.objects().items():
+                    if key == (target or client.target):
+                        continue
+                    if (got[0][2] > grasp_z + succ["lift_height"]
+                            and np.linalg.norm(got[0] - tool)
+                            < succ["max_ee_distance"]):
+                        return False, step, f"夾錯:{key}"
     return False, max_steps, "逾時"
 
 
@@ -338,19 +354,35 @@ def main(argv=None):
         if rec:
             print(f"[eval] 錄影像與軌跡 -> {known.record}(每 {known.frame_every} 步)")
         wins = 0
+        wrong = 0
         for i in range(known.episodes):
-            pos, yaw, r, th = sample_cube_pose(cfg, rng, known.holdout)
+            placements = target = None
+            if "objects" in cfg.raw:
+                placements, target, r, th = sample_scene(cfg, rng, known.holdout)
+                pos, yaw = placements[target]
+            else:
+                pos, yaw, r, th = sample_cube_pose(cfg, rng, known.holdout)
             if rec:
                 rec.start(i + 1, pos, yaw)
             ok, steps, why = run_episode(
                 client, policy, pre, post, kin, cfg, pos, yaw,
-                cfg["timing"]["max_episode_steps"], shapes, rec)
+                cfg["timing"]["max_episode_steps"], shapes, rec, placements, target)
+            wrong += why.startswith("夾錯")
             if rec:
                 rec.finish(ok, steps, why)
             wins += ok
-            print(f"  第 {i + 1:3d} 集  r={r * 1000:.0f}mm θ={th:+.0f}° "
+            tag = f"  {instruction_for(cfg, target)!r}" if target else ""
+            print(f"  第 {i + 1:3d} 集{tag}  r={r * 1000:.0f}mm θ={th:+.0f}° "
                   f"{'✅' if ok else '✗ '} {why} ({steps} 步)", flush=True)
         print(f"\n成功 {wins}/{known.episodes}")
+        if placements is not None:
+            # ⚠️ Worth separating: "lifted the wrong one" means the arm works and
+            # the instruction did not land, "timed out" means it never got hold
+            # of anything. A policy ignoring language sits near chance on the
+            # first and low on the second.
+            n_obj = len(cfg["objects"])
+            print(f"其中夾錯物體 {wrong}/{known.episodes}"
+                  f"   (隨機亂夾的期望成功率是 1/{n_obj} = {100/n_obj:.0f}%)")
         if client.loop_overruns:
             print(f"⚠️ 推論趕不上模擬的 tick 數:{client.loop_overruns}"
                   " —— 策略每一步前進得比一個控制週期多")
