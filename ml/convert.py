@@ -72,7 +72,7 @@ def episode_dirs(raw_root: Path):
     return eps
 
 
-def load_episode(ep_dir: Path, joints, cameras, pad_square=False):
+def load_episode(ep_dir: Path, joints, cameras, pad_square=False, resize=None):
     """One episode as ``(rows, meta)``, images already expanded per frame.
 
     Returns ``rows`` as a list of dicts ready for ``add_frame``.
@@ -146,7 +146,7 @@ def load_episode(ep_dir: Path, joints, cameras, pad_square=False):
                                    "(frames.npz 指到不存在的影像)")
             arr = np.asarray(Image.open(path).convert("RGB"))
             if pad_square:
-                arr = _pad_to_square(arr)
+                arr = _fit_square(arr, resize)
             cache[key] = arr
         return cache[key]
 
@@ -171,6 +171,24 @@ def load_episode(ep_dir: Path, joints, cameras, pad_square=False):
 
     ages = np.concatenate([age[c][start:] for c in cameras])
     return rows, meta, ages
+
+
+def _fit_square(arr, edge=None):
+    """Letterbox to a square canvas, then optionally scale to ``edge``.
+
+    ⚠️ **Both models should see the same pixels.** GR00T's ``image_size`` is a
+    fixed (256, 256): whatever it is handed, it resizes. Storing 448x448 and
+    storing 256x256 therefore give GR00T *identical* input, while the larger
+    file would quietly hand ACT more resolution than its 3B rival gets -- on a
+    benchmark whose entire purpose is comparing the two. Downscaling here keeps
+    the comparison honest, does the resize once instead of every epoch, and cuts
+    the dataset from ~145 GB to ~70 GB.
+    """
+    arr = _pad_to_square(arr)
+    if edge is None or arr.shape[0] == edge:
+        return arr
+    from PIL import Image as PILImage
+    return np.asarray(PILImage.fromarray(arr).resize((edge, edge), PILImage.LANCZOS))
 
 
 def _pad_to_square(arr):
@@ -231,6 +249,10 @@ def main(argv=None):
                     help="改用別的任務規格。⚠️ 舊的單物體 raw 是 320x240 五台相機錄的,"
                          "要轉就配 task/pick_cube_1obj.task.yaml —— 解析度與相機清單"
                          "都是從 task yaml 讀的,不是從 raw 推的。")
+    ap.add_argument("--resize", type=int, default=None, metavar="N",
+                    help="補邊之後再縮到 NxN。⚠️ 要跟 --pad-square 一起用。"
+                         "GR00T 反正會把輸入縮到 256x256,所以存 256 跟存 448 對它"
+                         "是同一件事 —— 但存小的可以避免偷偷給 ACT 更高的解析度。")
     ap.add_argument("--pad-square", action="store_true",
                     help="影像補黑邊成正方形。⚠️ GR00T 專用 —— 它會把 320x240 直接"
                          "拉成 256x256,方塊被壓成高比寬多 33%%,yaw 線索被扭曲。"
@@ -257,8 +279,11 @@ def main(argv=None):
         cameras = all_cameras
     resolution = tuple(cfg["cameras"]["record_resolution"])
     if args.pad_square:
-        edge = max(resolution)
+        edge = args.resize or max(resolution)
         resolution = (edge, edge)
+    elif args.resize:
+        raise ConvertError("--resize 要跟 --pad-square 一起用 —— 不補邊直接縮成"
+                           "正方形會把畫面壓扁,那正是 --pad-square 要修的問題。")
     fps = cfg["timing"]["fps"]
 
     raw_root = (REPO_ROOT / args.raw) if not Path(args.raw).is_absolute() \
@@ -274,7 +299,8 @@ def main(argv=None):
     print(f"out      : {out}")
     print(f"joints({len(joints)}): {', '.join(joints)}")
     print(f"cameras  : {', '.join(cameras)}  @ {resolution[0]}x{resolution[1]}"
-          + ("  (補黑邊成正方形)" if args.pad_square else "")
+          + (f"  (補黑邊成正方形{'後縮到 %d' % args.resize if args.resize else ''})"
+             if args.pad_square else "")
           + (f"  (從 {len(all_cameras)} 台選 {len(cameras)} 台)"
              if len(cameras) != len(all_cameras) else ""))
     print(f"fps      : {fps}")
@@ -299,7 +325,8 @@ def main(argv=None):
 
     total, all_ages, tasks = 0, [], {}
     for ep_dir in eps:
-        rows, meta, ages = load_episode(ep_dir, joints, cameras, args.pad_square)
+        rows, meta, ages = load_episode(ep_dir, joints, cameras, args.pad_square,
+                                        args.resize)
         if rows:
             tasks[rows[0]["task"]] = tasks.get(rows[0]["task"], 0) + 1
         for row in rows:
