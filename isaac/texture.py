@@ -262,3 +262,114 @@ def cube_face_uvs():
         uvs += [(u0 + inset, v0 + inset), (u1 - inset, v0 + inset),
                 (u1 - inset, v1 - inset), (u0 + inset, v1 - inset)]
     return uvs
+
+
+# ── 三個具名物體 ────────────────────────────────────────────────────────
+# 為什麼是這三個而不是三種顏色的方塊:純顏色的話,策略只要學「找最紅的像素」
+# 就能過關,那離語言接地還很遠。這三個**都是白底或多彩、都是盒狀**,要分辨得
+# 靠紋理樣式,而不是單一色相 —— 那才是要測的東西。
+#
+# ⚠️ 全部維持平面盒狀。物理跟現在那顆 25 mm 方塊完全相同(專家 analytic 20/20),
+# 這一輪只改任務語意,不動已經調好的接觸幾何。
+#
+# 低解析度下的判別依據(方塊在 448x336 下約 15 px 邊長):
+#   dice    高明度、低飽和、稀疏黑點
+#   rubik   多色相、高飽和、高空間頻率
+#   eraser  單一粉色、低空間頻率、比例扁長
+# 三者在「明度 / 飽和 / 空間頻率」三個軸上互相分開,不依賴單一線索。
+
+def dice_texture(path, seed=0, cell=256):
+    """White die, black pips, faces 1-6 in the standard opposite-sums-to-7 layout."""
+    rng = np.random.default_rng(seed + 11)
+    W, H = cell * CUBE_ATLAS_COLS, cell * CUBE_ATLAS_ROWS
+    im = Image.new("RGB", (W, H), (242, 240, 235))
+    draw = ImageDraw.Draw(im)
+    # (col, row) pip positions on a 3x3 grid, per face value.
+    PIPS = {
+        1: [(1, 1)],
+        2: [(0, 0), (2, 2)],
+        3: [(0, 0), (1, 1), (2, 2)],
+        4: [(0, 0), (2, 0), (0, 2), (2, 2)],
+        5: [(0, 0), (2, 0), (1, 1), (0, 2), (2, 2)],
+        6: [(0, 0), (2, 0), (0, 1), (2, 1), (0, 2), (2, 2)],
+    }
+    r = cell * 0.115                      # pip radius -- large, so it survives 15 px
+    for face in range(6):
+        ox, oy = (face % CUBE_ATLAS_COLS) * cell, (face // CUBE_ATLAS_COLS) * cell
+        # faint ivory shading so faces are not bit-identical under flat light
+        draw.rectangle([ox, oy, ox + cell - 1, oy + cell - 1],
+                       fill=(242 - face, 240 - face, 233 - face))
+        for c, rr in PIPS[face + 1]:
+            cx = ox + cell * (0.26 + 0.24 * c)
+            cy = oy + cell * (0.26 + 0.24 * rr)
+            draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(24, 22, 20))
+        # rounded-corner hint: dark corner ticks read as a die's bevel at distance
+        t = int(cell * 0.06)
+        for dx, dy in ((0, 0), (cell - t, 0), (0, cell - t), (cell - t, cell - t)):
+            draw.rectangle([ox + dx, oy + dy, ox + dx + t, oy + dy + t],
+                           fill=(214, 210, 202))
+    im.save(path)
+    return path
+
+
+def rubik_texture(path, seed=0, cell=256):
+    """3x3 sticker grid per face -- reads as "multicoloured" long before the
+    individual stickers resolve, which is the point at 15 px."""
+    rng = np.random.default_rng(seed + 22)
+    FACE = [(200, 30, 30), (30, 120, 220), (240, 240, 235),
+            (245, 200, 20), (20, 150, 70), (240, 120, 20)]
+    W, H = cell * CUBE_ATLAS_COLS, cell * CUBE_ATLAS_ROWS
+    im = Image.new("RGB", (W, H), (18, 18, 20))
+    draw = ImageDraw.Draw(im)
+    g = cell * 0.055                      # black gap between stickers
+    s = (cell - 4 * g) / 3
+    for face in range(6):
+        ox, oy = (face % CUBE_ATLAS_COLS) * cell, (face // CUBE_ATLAS_COLS) * cell
+        draw.rectangle([ox, oy, ox + cell - 1, oy + cell - 1], fill=(18, 18, 20))
+        for i in range(3):
+            for j in range(3):
+                # centre sticker keeps the face colour; the rest are scrambled,
+                # so no face is a flat colour patch that could pass for a plain cube
+                col = FACE[face] if (i == 1 and j == 1) else FACE[int(rng.integers(0, 6))]
+                x0 = ox + g + i * (s + g); y0 = oy + g + j * (s + g)
+                draw.rounded_rectangle([x0, y0, x0 + s, y0 + s],
+                                       radius=s * 0.18, fill=col)
+    im.save(path)
+    return path
+
+
+def eraser_texture(path, seed=0, cell=256):
+    """Blue block with a white paper sleeve across the middle.
+
+    The sleeve is the low-frequency cue that survives downsampling.
+
+    ⚠️ **Blue, not the more obvious pink.** Measured at 15 px, a pink eraser sits
+    at S=0.25 against a wood floor at S=0.28 and only ~40 deg of hue away -- it
+    would have to be segmented on brightness alone, which drifts with shadow.
+    Blue puts ~170 deg between them and roughly doubles the saturation gap, while
+    staying well clear of the Rubik's cube on edge density (14 vs 62).
+    """
+    rng = np.random.default_rng(seed + 33)
+    PINK = (62, 118, 200)
+    W, H = cell * CUBE_ATLAS_COLS, cell * CUBE_ATLAS_ROWS
+    im = Image.new("RGB", (W, H), PINK)
+    draw = ImageDraw.Draw(im)
+    for face in range(6):
+        ox, oy = (face % CUBE_ATLAS_COLS) * cell, (face // CUBE_ATLAS_COLS) * cell
+        draw.rectangle([ox, oy, ox + cell - 1, oy + cell - 1],
+                       fill=(PINK[0] - face * 3, PINK[1] - face * 2, PINK[2] - face * 2))
+        # paper sleeve -- a broad light band, placed off-centre so the face's
+        # orientation is still recoverable
+        band = cell * (0.30 + 0.05 * (face % 3))
+        y0 = oy + cell * (0.22 + 0.09 * (face % 4))
+        draw.rectangle([ox, y0, ox + cell - 1, y0 + band], fill=(246, 243, 236))
+        draw.rectangle([ox, y0, ox + cell - 1, y0 + cell * 0.02], fill=(120, 118, 112))
+        draw.rectangle([ox, y0 + band, ox + cell - 1, y0 + band + cell * 0.02],
+                       fill=(120, 118, 112))
+        # a couple of scuffs so it is not a perfectly clean synthetic block
+        for _ in range(3):
+            x = ox + int(rng.integers(0, cell)); y = oy + int(rng.integers(0, cell))
+            d = int(cell * 0.05)
+            draw.ellipse([x, y, x + d, y + d], fill=(48, 96, 170))
+    im.save(path)
+    return path
