@@ -54,9 +54,18 @@ ros:
   # ⚠️ 這裡是相機清單的**真相**:recorder / convert.py / eval.py / build_scene.py
   # 都 iterate 這個 dict,不是各自寫死名字。加相機要同時在這裡與 `cameras:`
   # 底下各加一筆,兩邊的 key 必須一致。
+  #
+  # ⚠️ **這個 dict 同時決定「建哪些相機 prim」與「發布哪些 topic」**
+  # (build_scene.py:431 與 :553 都 iterate 它)。從這裡拿掉一台,場景裡就不會
+  # 有那個 prim —— `cameras:` 底下的規格仍留著,要加回來只要在這裡補一行。
+  #
+  # 三物體任務只用三台。拿掉兩台後方相機有兩個理由,而且兩個都不是「省算力」:
+  #   1. M5/M6 的 dataset 本來就只用 front_left / front_right / wrist,
+  #      另外兩台錄了從來沒進過訓練
+  #   2. ⚠️ 每約 8 分鐘的 Isaac 崩潰是 ROS2PublishImage 擠同一個時間同步閘造成的
+  #      (見下面 cameras: 的註解),那是**發布次數**的競爭。五台降到三台等於
+  #      少 40% 的發布,正好換來把解析度提高的空間。
   camera_topics:
-    rear_right: "/cam_rear_right/rgb"
-    rear_left: "/cam_rear_left/rgb"
     front_right: "/cam_front_right/rgb"
     front_left: "/cam_front_left/rgb"
     wrist: "/cam_wrist/rgb"
@@ -97,6 +106,39 @@ spawn:
   #   只放一條 -> 訓練分布會偏向另一側
   holdout_theta_deg: [[-35.0, -20.0], [20.0, 35.0]]
 
+  # ⚠️ 只有**目標物**的 theta 受保留帶約束。干擾物可以落在任何地方 ——
+  # 保留帶測的是「目標出現在沒見過的位置時還抓不抓得到」,不是干擾物的分布。
+  #
+  # 三個物體中心之間的最小距離。夾爪全開約 51 mm,加上接近時的擺盪,80 mm
+  # 才不會在下降途中把鄰居撞開。⚠️ 環帶只有 80 mm 寬、在 r=0.20 處弧長約
+  # 350 mm,塞三個 80 mm 間隔的物體可行但不寬裕 —— 取樣器用拒絕取樣,
+  # 排不下就整組重抽,不會硬塞出重疊的場景。
+  min_separation: 0.08
+
+# ── 場上的三個物體 ───────────────────────────────────────────────────────
+# ⚠️ **三個的物理完全相同**(見上面 cube:),差別只有貼圖與名字。這是刻意的:
+# 這一輪改的是任務語意,不是接觸幾何 —— 專家的 analytic 20/20 是調出來的,
+# 不想在同一輪裡動它。查過本機沒有可用的現成 3D 物件,而蘋果/球那類形狀是
+# 兩點接觸又會滾,正好踩在專案已知的弱點上(見 texture.py 的註解)。
+#
+# 為什麼不是三種顏色的方塊:純顏色的話策略只要學「找最紅的像素」就能過關,
+# 那離語言接地還很遠。這三個要靠**紋理樣式**分辨,而且在實際觀測尺寸
+# (448x336 下約 15 px)量過,三者在飽和/明度/邊緣密度三個軸上互相分開。
+objects:
+  - key: dice                     # prim 名稱與 TF frame 用這個
+    label: "dice"                 # 進到指令字串
+    texture: dice                 # isaac/texture.py 裡的產生器
+  - key: rubik
+    label: "Rubik's cube"
+    texture: rubik
+  - key: eraser
+    label: "eraser"
+    texture: eraser
+
+# 指令模板。⚠️ 這是 dataset 裡 `task` 欄位的來源。GR00T 會讀它,ACT 不會
+# (modeling_act.py 完全沒有語言處理)—— 那正是這個任務要凸顯的差異。
+instruction: "pick up the {label}"
+
 # ── 相機 ────────────────────────────────────────────────────────────────
 # 四台**環境相機**繞著工作區的四個象限,外加一台腕上相機。
 #
@@ -131,7 +173,7 @@ spawn:
 cameras:
   # 主相機:內參對齊 Intel RealSense D455(使用者有一台),日後 sim2real 只要
   # 換影像來源。其餘三台環境相機是模擬專有的,真機不一定裝得起來。
-  rear_right:
+  rear_right:                          # 目前不在 ros.camera_topics 裡,規格留著備用
     resolution: [320, 240]
     horizontal_fov_deg: 90.0      # D455 彩色鏡頭約 90°×65°
     # TODO(M1): 用實測的 camera_info 換算精確內參
@@ -144,14 +186,14 @@ cameras:
     eye: [-0.1227, -0.2170, 0.3337]
     target: [0.21, 0.0, 0.03]     # 工作區中心
     clipping: [0.02, 10.0]
-  rear_left:
+  rear_left:                          # 目前不在 ros.camera_topics 裡,規格留著備用
     resolution: [320, 240]
     horizontal_fov_deg: 90.0
     eye: [-0.1227, 0.2167, 0.3337]      # rear_right 的 y 鏡像
     target: [0.21, 0.0, 0.03]
     clipping: [0.02, 10.0]
   front_right:
-    resolution: [320, 240]
+    resolution: [448, 336]
     horizontal_fov_deg: 90.0
     # 在工作區前方往回看,x 遠超手臂最大伸展 0.397 m,所以不會被手臂遮擋,
     # 也不會出現在其他相機的畫面裡。
@@ -159,13 +201,13 @@ cameras:
     target: [0.21, 0.0, 0.03]
     clipping: [0.02, 10.0]
   front_left:
-    resolution: [320, 240]
+    resolution: [448, 336]
     horizontal_fov_deg: 90.0
     eye: [0.5427, 0.2167, 0.3337]
     target: [0.21, 0.0, 0.03]
     clipping: [0.02, 10.0]
   wrist:
-    resolution: [320, 240]
+    resolution: [448, 336]
     horizontal_fov_deg: 70.0
     parent: "/omx_f/link5"          # 夾爪底座,跟著手臂動(link6/7 是手指)
     # 以下都在 **link5 的座標系**(home 時與世界軸對齊,可以直接讀)。
@@ -176,7 +218,20 @@ cameras:
     look_at: [0.0859, -0.0018, 0.0]
     clipping: [0.01, 5.0]
   # 資料集裡的影像尺寸(算繪解析度會降到這個大小再存)
-  record_resolution: [320, 240]
+  # ⚠️ 從 320x240 提高到 448x336。動機不是畫質,是**方塊在畫面上的大小**:
+  # 實測現在的 25 mm 方塊佔約 112 px(等效邊長 10.6 px),448x336 之下變成
+  # 219 px / 邊長 14.8 px。三物體任務要從紋理樣式分辨物體,10 px 太勉強。
+  #
+  # ⚠️ 算繪解析度與 record_resolution 保持一致 —— recorder 不做縮放,那也是
+  # 先前把算繪從 640x480 降下來時建立的約定。
+  #
+  # 像素吞吐量對照(那個 mutex 崩潰的風險指標):
+  #   640x480 x 5 = 1,536,000 px/幀   會崩
+  #   320x240 x 5 =   384,000 px/幀   穩定跑過 486 集
+  #   448x336 x 3 =   451,584 px/幀   略高,但發布次數少 40%
+  # ⚠️ 這個組合**沒有實測過**。開長跑之前要先讓 Isaac 跑 30 分鐘看會不會崩
+  # (原本的故障週期約 8 分鐘,30 分鐘足以暴露)。
+  record_resolution: [448, 336]
 
 # ── 紋理 ────────────────────────────────────────────────────────────────
 # ⚠️ 沒有紋理的場景會讓純視覺的策略學不動,兩個獨立的原因:
