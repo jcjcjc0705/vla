@@ -7,6 +7,61 @@
 active: groot_v3
 
 profiles:
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # 三物體 + 語言條件 —— 這一輪要證明的事
+  #
+  # ⚠️ ACT 在這個任務上**結構上做不到**:modeling_act.py 裡完全沒有語言處理,
+  # 它看不到 task 欄位。三個物體隨機指定一個,它的天花板就是隨機的 33%。
+  # GR00T 只要明顯超過 33%,對照就成立 —— 那是整個專案的論點。
+  #
+  # 兩組吃同一份 dataset(256x256 補邊),所以看到的像素完全一樣。
+  # GR00T 的 image_size 寫死 256,存更大只會偷偷讓 ACT 佔便宜。
+  # ══════════════════════════════════════════════════════════════════════════
+
+  # ACT —— 對照組,預期在 33% 附近
+  act_3obj:
+    dataset.repo_id: screamlab/omx_pick_3obj
+    dataset.root: data/lerobot_3obj
+    policy.type: act
+    policy.device: cuda
+    policy.push_to_hub: false
+    batch_size: 64
+    # 2000 集 x 約 208 幀 = 約 415k 幀。單物體任務時 ACT 與 GR00T 的最佳點都
+    # 落在看過約 3.2 個 epoch 的地方,這裡照那個比例推:64 x 20000 = 1.28M
+    # 樣本 = 3.1 epoch。⚠️ 那個 3.2 是在 486 集上量的,資料多 4 倍之後不保證
+    # 還成立 —— save_freq 設密一點,靠掃描找峰值而不是相信這個數字。
+    steps: 20000
+    save_freq: 2500
+    log_freq: 200
+    num_workers: 4
+    output_dir: outputs/act_3obj
+    tensorboard: true
+
+  # GR00T —— 主角。設定沿用 v1(單物體任務裡最好的那組:視覺凍住、lr 1e-4)
+  # ⚠️ 不要再開 tune_visual。v2 用 1e-4 解凍崩到 12%,v3 降到 1e-5 也只回到
+  # v1 的水準,而且在新 seed 上更差。那條路試過了。
+  groot_3obj:
+    dataset.repo_id: screamlab/omx_pick_3obj
+    dataset.root: data/lerobot_3obj
+    policy.type: groot
+    policy.base_model_path: nvidia/GR00T-N1.7-3B
+    policy.embodiment_tag: new_embodiment
+    policy.device: cuda
+    policy.push_to_hub: false
+    # batch 24 在 v2/v3 實測是 61.6 GB,那是**開了** tune_visual 的數字;
+    # 這裡沒開,可訓參數從 2.03B 降回 1.62B,顯存會更寬裕。
+    # ⚠️ 速度沒實測過(v1 是 batch 8 / 0.41 s/step,v3 是 batch 24 + 解凍
+    # 視覺 / 1.18 s/step),開跑前先用 --steps=30 探測。
+    batch_size: 24
+    steps: 24000          # 24 x 24000 = 576k 樣本 = 1.4 epoch。⚠️ 刻意先跑
+                          # 不到一輪 3.2 epoch —— 那要 55k 步、十幾個小時。
+                          # 先看曲線走向,不夠再 --resume 續跑。
+    save_freq: 3000
+    log_freq: 200
+    num_workers: 4
+    output_dir: outputs/groot_3obj
+    tensorboard: true
   # 唯一實驗變數是 tune_visual。v1 保留區最好 43%,ACT 是 90%。
   # 所有可調參數都列在這一組底下。
   groot_v2:
