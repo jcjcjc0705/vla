@@ -131,9 +131,9 @@ objects:
   - key: rubik
     label: "Rubik's cube"
     texture: rubik
-  - key: eraser
-    label: "eraser"
-    texture: eraser
+  - key: gift
+    label: "gift box"
+    texture: gift
 
 # 指令模板。⚠️ 這是 dataset 裡 `task` 欄位的來源。GR00T 會讀它,ACT 不會
 # (modeling_act.py 完全沒有語言處理)—— 那正是這個任務要凸顯的差異。
