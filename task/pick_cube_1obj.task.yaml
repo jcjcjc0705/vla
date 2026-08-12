@@ -1,0 +1,361 @@
+# ⚠️ **凍結的舊任務規格 —— 單一方塊、五台相機 320x240。**
+#
+# 這是 M5/M6 那四個模型(act_v1 / groot_v1 / groot_v2 / groot_v3)訓練與評估時
+# 的設定。三物體任務把 pick_cube.task.yaml 改掉了,舊模型要複測就配這一份:
+#
+#     cp assets/pick_cube_1obj.usd assets/pick_cube.usd   # 換回舊場景
+#     # 重啟 Isaac 載入
+#     python3 ml/eval.py --task task/pick_cube_1obj.task.yaml --checkpoint ...
+#
+# ⚠️ **不要改這個檔。** 改了就對不上那四個模型,EVAL_RESULTS.md 的數字也就
+# 失去可複現性。要調參數請改 pick_cube.task.yaml。
+
+# pick_cube 任務規格 —— 這是唯一該手改的檔案。
+#
+# build_scene.py 讀它產生 assets/pick_cube.usd,其餘每一支程式也都從這裡取值。
+# 改了場景相關的值要重跑 build_scene.py 並在 Isaac 重載。
+# **不要把數值寫進程式碼。**
+#
+# ⚠️ 改 cube 或 gripper 底下的東西會讓先前錄的資料作廢(物理變了)。
+
+# 這隻手臂的資料(USD、meshes、profile)**只有一個來源:omx_bridge_image**。
+#
+# 底下兩個候選不是「兩台機器」,是**容器內 vs host** —— 同一個 image 的內容在兩個
+# 位置出現:
+#
+#   /               容器內。image 把 assets/ 與 profile/ 烤在根目錄
+#   .image_cache    host。由 isaac/fetch_assets.sh 從**同一個 image** 匯出
+#
+# ⚠️ 先前這裡列了三條各自 clone 出來的 checkout 路徑。那是錯的設計:每一份都可能
+# 跟正在跑的 image 不同版本,而症狀會是「場景看起來對但數字不對」這種最難查的東西。
+# 現在兩個候選指的都是同一個 image 的內容。
+#
+# host 上第一次使用(或 pull 了新的 omx_bridge_image 之後)要跑:
+#   bash isaac/fetch_assets.sh
+paths:
+  # 相對於這個 repo 的根目錄。找不到時 task_config.py 會說是哪幾條路徑失敗。
+  omx_bridge:
+    - "/"                       # 容器內
+    - ".image_cache"            # host,fetch_assets.sh 匯出的
+  sim_real_bridge:              # 只為了 profile.py(關節順序的唯一真相)
+    - ".image_cache"            # host。容器內是已安裝的 ROS 套件,不走這條
+  # 相對於 omx_bridge_image
+  robot_usd: "assets/omx_f.usd"
+  robot_urdf: "assets/omx_f/omx_f.urdf"
+  profile: "profile/omx_f.profile.yaml"
+  # 相對於這個 repo
+  scene_usd: "assets/pick_cube.usd"
+
+# ── ROS 介面 ────────────────────────────────────────────────────────────
+# 讀方塊位姿走 TF(串流、標準訊息);寫方塊位姿走 Isaac 的 prim 服務
+# (請求式,一集只用幾次)。
+#
+# ⚠️ 寫入**不能**用 ROS2SubscribeTransformTree。它看起來剛好是反向的那個
+# 節點,但它改的是 **articulation root**,鬆散的剛體不算。2026-08-05 實測:
+# Isaac 確實訂閱了該 topic、也收到 transform,方塊完全不動 —— 四種 frame
+# 命名都一樣。而在模擬中直接寫 xformOp:translate 是有效的(也實測過),那
+# 正是 set_prim_attribute 做的事。
+ros:
+  cube_tf_topic: "tf"          # Isaac -> 我們:方塊現在在哪
+  cube_frame: "cube"           # child_frame_id(= prim 名)
+  # 服務名是 ROS2ServicePrim 的預設值
+  get_attribute_service: "/get_prim_attribute"
+  set_attribute_service: "/set_prim_attribute"
+  # 相機影像。ROS2CameraHelper 發的是「render product」不是相機 prim,所以
+  # 每台相機都要先有一個 IsaacCreateRenderProduct。
+  # ⚠️ 這裡是相機清單的**真相**:recorder / convert.py / eval.py / build_scene.py
+  # 都 iterate 這個 dict,不是各自寫死名字。加相機要同時在這裡與 `cameras:`
+  # 底下各加一筆,兩邊的 key 必須一致。
+  camera_topics:
+    rear_right: "/cam_rear_right/rgb"
+    rear_left: "/cam_rear_left/rgb"
+    front_right: "/cam_front_right/rgb"
+    front_left: "/cam_front_left/rgb"
+    wrist: "/cam_wrist/rgb"
+  camera_frame_skip: 0           # >0 可以在算繪吃緊時降低發佈頻率
+
+scene:
+  task_root: "/World/task"        # 我們新增的東西都掛在這底下,不碰 /omx_f
+  robot_root: "/omx_f"            # sublayer 帶進來的,唯讀
+
+# ── 要抓的方塊 ───────────────────────────────────────────────────────────
+# 15 g @ 25 mm。夾爪指尖法向力約 0.14 N(可夾 25–30 g),所以這在預算內、
+# 還有約 2 倍餘裕。夾不住時第一個該調的就是 mass。
+cube:
+  size: 0.025                     # m,邊長
+  mass: 0.015                     # kg
+  color: [0.85, 0.15, 0.15]
+  # ⚠️ Isaac 預設 static_friction=0.2 太滑,一定要自己指定
+  static_friction: 1.0
+  dynamic_friction: 0.9
+  restitution: 0.0
+
+# ── 每回合方塊生成的位置 ─────────────────────────────────────────────────
+# 環帶取樣。手臂最大伸展約 0.40 m(肩在 (-0.011, 0, 0.0975)),
+# 這個範圍留了充足餘裕給「先移到方塊正上方」的姿態。
+spawn:
+  # ⚠️ 外緣不能再往外。夾爪垂直朝下時手腕必須先高出目標 114.6mm,那段吃掉的
+  # 是平面 2R 的 0.2825m 額度 —— r=0.24 最高只能懸停 85mm,r=0.26 連抓取高度
+  # 都搆不到。改動前先跑 omx_vla_app/ik.py --map。
+  radius: [0.16, 0.24]            # m
+  theta_deg: [-50.0, 50.0]        # 繞 +Z,0 = +X 方向
+  yaw_deg: [-45.0, 45.0]          # 方塊自身朝向
+  # 訓練絕不使用的保留區,用來驗證「策略真的在看影像」而不是背軌跡。
+  # M5 的成敗就看這一區的成功率。
+  #
+  # ⚠️ 兩條、對稱、而且在**內部**,三個條件缺一不可:
+  #   放中間 -> 無視影像的策略瞄準的就是 θ≈0,那反而是它唯一會過的地方
+  #   放邊緣 -> 測的是外插,分不清「沒在看影像」與「那區沒有示範」
+  #   只放一條 -> 訓練分布會偏向另一側
+  holdout_theta_deg: [[-35.0, -20.0], [20.0, 35.0]]
+
+# ── 相機 ────────────────────────────────────────────────────────────────
+# 四台**環境相機**繞著工作區的四個象限,外加一台腕上相機。
+#
+# 命名照**相對基座的方位**,不是照用途:+x 是手臂正前方(θ=0),+y 是左、
+# -y 是右(右手座標系,+z 向上)。所以 rear_right 在基座的右後方,越過基座
+# 看向工作區。
+#
+# ⚠️ 舊名 `front` 已改為 `rear_right` —— 它一直都在右後方,那個名字是錯的,
+# 加進真正的前方相機之後會無法分辨。改名會讓先前錄的資料集少一個 key,
+# 但加相機本來就要重錄。
+#
+# 四台環境相機的幾何完全對稱:距離工作區中心都是 0.50 m、高度差都是 0.304 m、
+# 水平方位角 ±146.9°(後)與 ±33.1°(前)。`rear_right` 的位置是 M1 調出來的,
+# 其餘三台是它的鏡像 —— 所以四台的構圖尺度一致,M5 拿它們做對照才有意義。
+#
+# M5 的對照:2 台環境 vs 4 台環境,都再加腕上。⚠️ 真手臂上**沒有**腕上相機,
+# 所以那組對照決定要不要花錢買一台。
+#
+# ⚠️ **算繪解析度從 640×480 降到 320×240,跟 record_resolution 一致。**
+# 原本刻意用較高的算繪解析度「為了看」,但五台相機之後 Isaac 開始每約 8 分鐘
+# crash 一次,崩潰堆疊裡只有兩個模組:
+#
+#     omni.graph.action.RationalTimeSyncGate
+#     isaacsim.ros2.bridge.ROS2PublishImage
+#
+# 也就是五台相機的 ROS 發布擠過同一個時間同步閘,觸發 Isaac 內部的
+# `unlock() called by non-owning thread`。那是 Isaac 自己的 thread bug,改不了,
+# 只能縮短競爭窗口 —— 降解析度讓每次發布的像素量少 75%。
+#
+# **訓練資料完全不受影響**:recorder 本來就把影像降到 record_resolution,
+# 現在只是少做一次縮放。唯一的損失是 GUI 裡的相機畫面變小。
+cameras:
+  # 主相機:內參對齊 Intel RealSense D455(使用者有一台),日後 sim2real 只要
+  # 換影像來源。其餘三台環境相機是模擬專有的,真機不一定裝得起來。
+  rear_right:
+    resolution: [320, 240]
+    horizontal_fov_deg: 90.0      # D455 彩色鏡頭約 90°×65°
+    # TODO(M1): 用實測的 camera_info 換算精確內參
+    #   ros2 topic echo /camera/camera/color/camera_info --once
+    #   再餵給 camera/cameracalibration/isaac_camera.py
+    # 斜後上方往下看,距離工作區中心 0.50 m。方塊約 16 px,整個工作範圍
+    # (生成環帶 ±50°、夾爪在環帶上方 0.20 m 盤旋、底座)還留 55 px 邊距;
+    # 0.45 m 只剩 19 px 邊距,0.42 m 就切到夾爪。
+    # 構圖用距離調,**不要動 FOV** —— 90° 是要對齊 D455 的。
+    eye: [-0.1227, -0.2170, 0.3337]
+    target: [0.21, 0.0, 0.03]     # 工作區中心
+    clipping: [0.02, 10.0]
+  rear_left:
+    resolution: [320, 240]
+    horizontal_fov_deg: 90.0
+    eye: [-0.1227, 0.2167, 0.3337]      # rear_right 的 y 鏡像
+    target: [0.21, 0.0, 0.03]
+    clipping: [0.02, 10.0]
+  front_right:
+    resolution: [320, 240]
+    horizontal_fov_deg: 90.0
+    # 在工作區前方往回看,x 遠超手臂最大伸展 0.397 m,所以不會被手臂遮擋,
+    # 也不會出現在其他相機的畫面裡。
+    eye: [0.5427, -0.2167, 0.3337]
+    target: [0.21, 0.0, 0.03]
+    clipping: [0.02, 10.0]
+  front_left:
+    resolution: [320, 240]
+    horizontal_fov_deg: 90.0
+    eye: [0.5427, 0.2167, 0.3337]
+    target: [0.21, 0.0, 0.03]
+    clipping: [0.02, 10.0]
+  wrist:
+    resolution: [320, 240]
+    horizontal_fov_deg: 70.0
+    parent: "/omx_f/link5"          # 夾爪底座,跟著手臂動(link6/7 是手指)
+    # 以下都在 **link5 的座標系**(home 時與世界軸對齊,可以直接讀)。
+    # translate 是在 GUI 裡擺到貼合鏡頭座的位置;朝向不用管,look_at 會依
+    # 這個位置重算。
+    translate: [0.04904, -0.00017, 0.03437]
+    # ⚠️ 這是夾持點,必須跟 gripper.grasp_offset 指同一個位置,改一個要改兩個。
+    look_at: [0.0859, -0.0018, 0.0]
+    clipping: [0.01, 5.0]
+  # 資料集裡的影像尺寸(算繪解析度會降到這個大小再存)
+  record_resolution: [320, 240]
+
+# ── 紋理 ────────────────────────────────────────────────────────────────
+# ⚠️ 沒有紋理的場景會讓純視覺的策略學不動,兩個獨立的原因:
+#
+#   1. 素色地板沒有地標。每一塊看起來都一樣,策略沒有任何視覺參考可以定位,
+#      只能從手臂自己的輪廓反推深度。
+#   2. 素色立方體在畫面上是**旋轉對稱**的。spawn.yaw_deg 把方塊 yaw 隨機化
+#      ±45°,但沒有表面細節時那個變化在像素上根本不存在 —— 兩集只差 yaw 會產生
+#      一模一樣的影像卻對應不同的專家動作。那是標註雜訊,而且不是多收資料就能解的。
+#
+# 兩張圖都由 isaac/texture.py 程式生成(產物,gitignored),seed 記在這裡所以可重現。
+textures:
+  seed: 0
+  table:
+    # ⚠️ 這是**視覺用的**桌面,不是地板。真正的地板是 sublayer 帶進來的
+    # /Environment/ground,它 100 m 見方而 UV 只有 0~1 —— 貼圖上去的話 0.5 m
+    # 的工作區只會拿到約 5 個像素。物理仍然用那塊地板,這塊只給相機看。
+    size: 2.0                     # m,邊長。FOV 90° 在 0.5 m 處視野約 1 m,要蓋滿
+    center: [0.21, 0.0]           # 對齊工作區中心
+    lift: 0.0005                  # m,墊高避免與地板 z-fighting。必須是**正的**,
+                                  # 不然會被不透明的地板蓋住;方塊看起來陷入 0.5 mm,
+                                  # 對 25 mm 的方塊是 2%,看不出來,也不碰物理。
+    # ⚠️ 木紋不是為了好看,是為了**色相與飽和度**的分離。手臂與夾爪是灰色金屬,
+    # 灰色桌面讓兩者幾乎同色 —— 腕上相機最嚴重(夾爪佔畫面大半、背景同色,等於
+    # 要策略從灰色裡分出灰色)。色相差在陰影與曝光變化下都還在,明度差則不然。
+    #
+    # 三者在飽和度上是一道階梯,這才是主要的分離依據:
+    #   灰夾爪 S≈0.04  <  木紋 S≈0.39  <  紅方塊 S≈0.82
+    #
+    # ⚠️ 方塊在 320×240 下只有 8~12 px,顏色是找到它的主要線索。日後若方塊變得
+    # 難找,正確的調整是把木色**再降飽和**,不是調暗 —— 調暗只會加大明度差,而
+    # 明度會隨光照與陰影漂移,飽和度不會。
+    style: wood                   # wood | mottled(mottled 是灰色斑點版,留著備用)
+    wood_light: [0.74, 0.64, 0.48]
+    wood_dark: [0.55, 0.44, 0.31]
+    rings: 15.0                   # 年輪密度。2 m 桌面上約 15 道
+    distortion: 0.55              # 年輪被雜訊扭曲的程度 —— 太大會變成沙丘狀的大波浪,
+                                  # 真實木地板的紋路是細長略彎的,不是起伏
+    knots: 5                      # 節疤。大尺度、明顯不對稱的結構主要靠它
+    sharpness: 1.3                # 年輪暗線的銳利度。淺色木紋要柔和,值不能太高
+
+# ── 只在這個場景生效的物理覆寫 ───────────────────────────────────────────
+# 這些是 pick_cube.usd 裡的 override,**不會動到 omx_f.usd**。
+# omx_f.usd 是 sim↔real 校正鏈的一部分,必須保持位元不變。
+overrides:
+  gripper_drive:
+    # 原始值 stiffness=625 / damping=40 對應指尖約 0.14 N。夾不住就往上調。
+    joints: ["gripper_joint_1"]
+    stiffness: 625.0
+    damping: 40.0
+  arm_drive:
+    joints: ["joint1", "joint2", "joint3", "joint4", "joint5"]
+    stiffness: 625.0
+    damping: 40.0
+  mimic_joint:
+    # gripper_joint_2 是被動指:它**沒有 drive**,只靠 PhysxMimicJoint 跟隨
+    # gripper_joint_1。原廠 naturalFrequency=25 太軟,夾到東西時被動指會被推開,
+    # 變成只有一根手指出力 —— 調 drive stiffness 完全沒用。
+    # 調硬也更貼近真實:真手臂第二指是齒輪連動,不是彈簧。
+    joint: "gripper_joint_2"
+    natural_frequency: 1000.0
+    damping_ratio: 0.8
+
+  finger_colliders:
+    # 手指的夾持面是弧形的,內表面起伏 18.5mm(量兩根 collider mesh 得到),
+    # 所以任何凸性近似都會把凹陷填掉一部分。
+    #
+    # convexHull 與 convexDecomposition 都試過,選 convexHull:
+    #   * 兩者都是**過度**近似。凸塊是頂點子集的凸包,聯集必然 ⊇ 原始網格 ——
+    #     分解只是換個地方胖,不是變忠實。實測夾得很穩時兩側都出現明顯的縫。
+    #   * 功能上等價:analytic 與 moveit 兩種解算器下都是 20/20。
+    #   * 分解讓相機從 12.0 掉到 9.4 Hz(目標 30),而且**視覺判讀失效** ——
+    #     凸塊比網格胖又不被算繪,「看起來沒碰到」變成沒有資訊。這一段開發
+    #     裡用眼睛看是最有效的診斷管道,不值得為了一個等價的近似關掉它。
+    #
+    # 接觸幾何若真的變成瓶頸,下一步是 pads(明確給一個平整夾持面),
+    # 不是換近似方式。
+    prims:
+      - "/colliders/link6/follower_07_gripper_motorized/node_STL_BINARY_"
+      - "/colliders/link7/follower_08_gripper_gear/node_STL_BINARY_"
+    approximation: "convexHull"
+
+  pads:
+    # 最後手段:在兩根手指內側各加一片薄板當夾持面。
+    enabled: false
+    size: [0.020, 0.002, 0.012]   # m
+
+  hide:
+    # URDF 的 end_effector_link 帶了一個 10mm 紅色 <box> 除錯標記,它落在腕上
+    # 相機正中央、跟目標方塊同色。蓋在這一層,jog/to_sim/to_real 仍然看得到。
+    #
+    # 寫 Stage 樹上看到的路徑就好,build_scene 會自己解析 instance proxy。
+    # ⚠️ 不要自己猜來源路徑:/visuals/link5/mesh_1 看起來像但不是,寫過去
+    # 會靜默地什麼都沒發生。
+    prims:
+      - "/omx_f/link5/visuals/mesh_1"
+
+# ── 夾爪開合 ────────────────────────────────────────────────────────────
+# ⚠️ home(q=0)時夾爪是**閉合**的,正值 = 開。
+gripper:
+  joint: "gripper_joint_1"
+  open: 0.60                      # rad
+  closed: 0.0
+  grasp: -0.05                    # 略超過接觸,靠 drive 持續施力
+  # 夾持點相對 end_effector_link 的偏移,**在 EE 自己的座標系**(m)。
+  #
+  # z 來自幾何:兩根手指的樞軸都在 z_link5 = 0,零件是對稱板狀
+  # (包圍盒 link6 z[-21.3,+21.3]、link7 z[-20.0,+20.0])。
+  #
+  # ⚠️ **不要用「夾住後方塊在哪」驗證 z**。手指只在 y(開合方向)約束方塊,
+  # z 完全不管,所以那個量測在 z 軸上是循環的 —— 量到的永遠等於設定的
+  # (試過 -11/-4/-18,量回 -10.5/-3.6/-17.7)。要驗證只能看幾何或看影像。
+  grasp_offset: [-0.006, -0.0002, 0.0]
+  # 參考:夾住 25mm 方塊時 gripper_joint_1 實際停在 +0.278 rad。
+  # 命令值(grasp)比它更緊是刻意的,drive 才會持續施力。
+  holding_position: 0.278
+
+# ── 腳本專家 ────────────────────────────────────────────────────────────
+# 產生示範資料用。它會用 ground truth 的方塊位置算 IK —— 這只發生在**產生
+# 資料時**;策略看到的永遠只有影像 + 關節狀態,座標不會進入模型。
+expert:
+  speed: 0.15                     # m/s,工具空間移動
+  joint_speed: 1.2                # rad/s,起始那段關節空間移動
+  descend_speed: 0.05             # m/s,下降到夾持點時放慢
+  hover_prefer: 0.12              # m,方塊上方的偏好懸停高度(搆不到會自動降)
+  hover_floor: 0.05
+  close_ticks: 15                 # 夾合後等幾個控制週期
+  lift_extra: 0.03                # 抬到 success.lift_height 之上再多留一點
+  lift_margin: 0.005              # 抬升至少要高過 lift_height 這麼多,否則規劃階段就放棄
+  hold_margin: 10                 # HOLD 比 success.hold_steps 多撐幾個週期
+  arrive_tol: 0.002               # m,判定**命令**到達路徑點
+  # 下降到位、抬升到位之後,還要等**手臂實際**進到這個範圍才往下一階段。
+  # 只看命令的話手臂會落後十幾 mm(方塊才 25mm),夾合就發生在方塊上緣;
+  # 靠夾合的 0.5 秒去追是時序巧合,重力力矩大的姿態就會失敗。
+  settle_tol: 0.003               # m
+  settle_max_ticks: 60            # 2 秒還沒到就放行,不能讓單集卡住
+  max_ticks: 400                  # 單集上限,逾時算失敗
+
+  # ⚠️ 雜訊不是可有可無的。腳本專家的軌跡近乎單模態,隨機化不夠時學生會學成
+  # 「無視影像、照平均軌跡揮一遍」也能拿高分。要產生的是一個**分布**,
+  # 不是一條軌道。M5 用保留區的成功率來驗收。
+  noise:
+    waypoint_xy: 0.005            # m,1σ,每個路徑點的水平抖動
+    hover_height: 0.02            # m,1σ
+    close_ticks: 3                # 控制週期,夾合時機
+    joint_jitter: 0.002           # rad,1σ,每一步
+
+# ── 成功判定 ────────────────────────────────────────────────────────────
+# 兩個條件都要,而且要連續成立 hold_steps 步:
+#   lifted 擋不住「方塊被彈飛」,held 才擋得住;
+#   單一影格擋不住彈跳,連續才擋得住。
+success:
+  lift_height: 0.05               # m,高於方塊半徑
+  max_ee_distance: 0.06           # m,方塊必須還在夾爪附近
+  hold_steps: 15                  # 0.5 s @ 30 fps
+
+# ── 時間 ────────────────────────────────────────────────────────────────
+timing:
+  physics_dt: 0.008333333          # 1/120
+  render_every: 4                  # 每 4 個物理步算繪並記錄一次 → 30 fps
+  fps: 30
+  settle_steps: 20                 # reset 之後讓方塊落定
+  # reset 之後、擷取第一張影像之前要空跑幾個**算繪**幀。
+  #
+  # ⚠️ 不是可選的。RTX 會跨幀累積,而 render=False 的步進完全不推進它,所以
+  # 瞬移方塊之後前幾幀**整張還是上一集**,再幾十幀才淡出殘影 —— 等於在訓練
+  # 影像裡放一個位置隨機的假目標。實測殘留(0-255):4 幀 78.5、16 幀 12、
+  # 64 幀 0.2、128 幀 0。
+  reset_render_frames: 128
+  max_episode_steps: 450           # 15 s @ 30 fps,逾時視為失敗

@@ -196,6 +196,24 @@ client 訂閱 `ros.camera_topics` 全部五台,dataset 只有 `--cameras` 選的
 ⚠️ `last` symlink 已移除,所以這幾個 run 不能再 `--resume`。要用就是
 `--checkpoint outputs/<run>/checkpoints/best/pretrained_model`。
 
+## 怎麼複測這四個模型
+
+三物體任務改掉了 `task/pick_cube.task.yaml` 與場景。要複測 M5/M6 的模型,
+**場景與任務規格兩樣都要切回去**:
+
+```bash
+cp assets/pick_cube_1obj.usd assets/pick_cube.usd    # 換回單物體場景
+# 重啟 Isaac 載入
+python3 ml/eval.py --task task/pick_cube_1obj.task.yaml \
+  --checkpoint outputs/groot_v1/checkpoints/best/pretrained_model --episodes 20 --holdout
+```
+
+⚠️ 只換 USD 不夠 —— 相機清單(五台 vs 三台)與解析度(320×240 vs 448×336)
+是從 task yaml 讀的,不是從場景。影像尺寸倒是不用管,`eval.py` 會從 checkpoint
+的 `input_features` 自己對齊。
+
+`task/pick_cube_1obj.task.yaml` 是凍結檔,改了就對不上這四個模型。
+
 ## 環境
 
 Isaac Sim 5.1.0-rc.19 · lerobot 0.6.1 · torch 2.11.0+cu128 · numpy 2.2.6 · RTX PRO 6000 (96 GB)

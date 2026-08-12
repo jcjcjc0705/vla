@@ -251,6 +251,11 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--holdout", action="store_true", help="只在保留區取樣")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--task", default=None, metavar="YAML",
+                    help="改用別的任務規格。⚠️ M5/M6 那四個模型是在單一方塊、"
+                         "五台相機 320x240 下訓練的,要複測就配 "
+                         "task/pick_cube_1obj.task.yaml 並把 assets/pick_cube_1obj.usd "
+                         "換回 assets/pick_cube.usd。")
     ap.add_argument("--record", metavar="DIR", default=None,
                     help="把 policy 實際看到的畫面與逐步軌跡寫到 DIR(診斷用,很佔空間)")
     ap.add_argument("--frame-every", type=int, default=10,
@@ -263,7 +268,9 @@ def main(argv=None):
                              extra=["-p", "mode:=command", "-p", "targets:=sim"]))
     engine = SyncNode()
     profile_path = engine.get_parameter("profile").get_parameter_value().string_value
-    cfg = task_config.load()
+    cfg = task_config.load(Path(known.task)) if known.task else task_config.load()
+    if known.task:
+        print(f"[eval] 任務規格 {known.task}")
     client = ExpertClient(load_profile(profile_path), cfg)
     kin = OMXKinematics(cfg)
 
