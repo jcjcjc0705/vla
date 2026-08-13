@@ -44,7 +44,10 @@ paths:
   robot_urdf: "assets/omx_f/omx_f.urdf"
   profile: "profile/omx_f.profile.yaml"
   # 相對於這個 repo
-  scene_usd: "assets/pick_cube.usd"
+  # ⚠️ 這份規格是凍結的舊任務,場景必須指向備份的單物體 USD。指到
+  # assets/pick_cube.usd(現行三物體場景)的話,build_scene.py --force
+  # 會把三物體場景直接覆蓋掉。
+  scene_usd: "assets/pick_cube_1obj.usd"
 
 # ── ROS 介面 ────────────────────────────────────────────────────────────
 # 讀方塊位姿走 TF(串流、標準訊息);寫方塊位姿走 Isaac 的 prim 服務
