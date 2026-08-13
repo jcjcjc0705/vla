@@ -87,8 +87,16 @@ def _profile_args(argv):
         raise SystemExit(
             f"{_CONFIG} 裡沒有 profile '{name}'。可用的:{sorted(profiles)}")
 
+    # ⚠️ On resume the checkpoint's own train_config.json is the config; a profile
+    # layered on top would silently retrain under whatever `active:` happens to be
+    # today. Only `tensorboard` survives, so the run keeps writing to the same
+    # event file instead of quietly logging nowhere.
+    resuming = _has(argv, "--resume") and "--resume=false" not in argv
+
     extra = []
     for key, val in (profiles[name] or {}).items():
+        if resuming and key != "tensorboard":
+            continue
         if key == "tensorboard":
             if val and "--tensorboard" not in argv:
                 argv.append("--tensorboard")
