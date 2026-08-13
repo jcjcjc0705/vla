@@ -4,7 +4,7 @@
 # ⚠️ 註解掉的是「可調,目前用預設」,不是不能用。後面標的是 lerobot 的預設值。
 # 刻意不把預設寫成生效設定 —— 那會把它們釘死,lerobot 改了預設我們不會知道。
 
-active: groot_v3
+active: groot_3obj
 
 profiles:
 
@@ -38,9 +38,25 @@ profiles:
     output_dir: outputs/act_3obj
     tensorboard: true
 
-  # GR00T —— 主角。設定沿用 v1(單物體任務裡最好的那組:視覺凍住、lr 1e-4)
-  # ⚠️ 不要再開 tune_visual。v2 用 1e-4 解凍崩到 12%,v3 降到 1e-5 也只回到
-  # v1 的水準,而且在新 seed 上更差。那條路試過了。
+  # GR00T —— 主角
+  #
+  # 🛑 2026-08-13:四個舊模型用同一套 eval 重量 60 集之後,這一組的設定依據
+  # 有一半塌了。舊評估把五台相機餵給只吃三台的 checkpoint,數字系統性偏低:
+  #
+  #            影像          lr      tune_visual   舊數字   重量(60 集)
+  #   v1     240x320       1e-4         關         43%       60%
+  #   v2     240x320       1e-4         開         12%       58%    v1 vs v2 z=0.19
+  #   v3   320x320 補邊    1e-5         開         45%       35%    v2 vs v3 z=2.56
+  #
+  # ⚠️ tune_visual 對成績**沒有影響**(v1 vs v2 只差這一個變數)。所謂
+  # 「v2 災難性遺忘」是量測誤差,從來沒發生過。
+  #
+  # ⚠️ 所以 lr 1e-5 是為了擋一個不存在的現象而設的,而唯一用它的 v3 是三個
+  # 裡最差的。**這一組現在用的正是 v3 那套(補邊 + 1e-5 + 解凍)。**
+  # 沒測過的那一格是「補邊 + 1e-4」—— 見 groot_3obj_lr4。
+  #
+  # 留著這一組不是因為它對,是因為 step 12000 的 checkpoint 已經存在,
+  # 拿它當 lr 對照組比丟掉划算。詳見 EVAL_RESULTS.md。
   groot_3obj:
     dataset.repo_id: screamlab/omx_pick_3obj
     dataset.root: data/lerobot_3obj
@@ -49,10 +65,30 @@ profiles:
     policy.embodiment_tag: new_embodiment
     policy.device: cuda
     policy.push_to_hub: false
-    # batch 24 在 v2/v3 實測是 61.6 GB,那是**開了** tune_visual 的數字;
-    # 這裡沒開,可訓參數從 2.03B 降回 1.62B,顯存會更寬裕。
-    # ⚠️ 速度沒實測過(v1 是 batch 8 / 0.41 s/step,v3 是 batch 24 + 解凍
-    # 視覺 / 1.18 s/step),開跑前先用 --steps=30 探測。
+    # ── 解凍視覺塔 ────────────────────────────────────────────────────
+    # 開這個的理由現在只剩任務性質這一條:舊任務只要找到唯一的紅色物體,
+    # 視覺好不好不是瓶頸;這一輪要分辨骰子的黑點、魔術方塊的格子、禮物盒的
+    # 緞帶,那是凍住的通用特徵最不擅長的細粒度判別。
+    #
+    # ⚠️ 但 2026-08-13 重量顯示 tune_visual 在單物體任務上**完全沒有影響**
+    # (60% vs 58%),所以「解凍會有幫助」目前是沒有證據的假設,不是結論。
+    #
+    # ⚠️ 而且 256x256 的實拍畫面裡三個物體各只有約 10-12 px,骰子的點數與
+    # 魔方的格線在那個尺寸下已經糊掉了 —— 實際可用的是整體色彩(白 / 紅 /
+    # 雜色)這種粗特徵。「需要細緻紋理」那半的理由站不住,剩下資料量那半。
+    policy.tune_visual: true
+
+    # 🛑 **1e-5 這個選擇的依據已被推翻。** 原本寫的是「v2 用 1e-4 -> 12%
+    # (災難性遺忘);v3 降到 1e-5 -> 45%,遺忘被擋住」。重量後 v2 是 58%、
+    # v3 是 35% —— 遺忘沒發生過,而 1e-5 對應的是最差的那一組。
+    #
+    # 保留 1e-5 只是為了讓 step 12000 的 checkpoint 還能續訓並當作對照。
+    # 真正該測的是 1e-4,見 groot_3obj_lr4。
+    policy.optimizer_lr: 1.0e-5
+
+    # v3 實測這組(batch 24 + 解凍視覺)是 2.03B 可訓、61.6 GB、1.18 s/step。
+    # ⚠️ 那是在 320x320 的輸入上量的,這裡是 256x256,會更省更快 —— 但仍然
+    # 建議開跑前 --steps=30 探測一次。
     batch_size: 24
     steps: 24000          # 24 x 24000 = 576k 樣本 = 1.4 epoch。⚠️ 刻意先跑
                           # 不到一輪 3.2 epoch —— 那要 55k 步、十幾個小時。
@@ -62,7 +98,35 @@ profiles:
     num_workers: 4
     output_dir: outputs/groot_3obj
     tensorboard: true
-  # 唯一實驗變數是 tune_visual。v1 保留區最好 43%,ACT 是 90%。
+
+  # GR00T,唯一的變數是 lr 1e-4(GrootConfig 的預設)。
+  #
+  # 這是單物體任務裡**沒測過的那一格**:v1/v2 是 1e-4 但沒補邊(60% / 58%),
+  # v3 是補邊但 1e-5(35%)。補邊修的是真實的幾何問題(非等比縮放讓旋轉的
+  # 方塊變成平行四邊形),不該拿掉;1e-5 是為了擋一個不存在的災難性遺忘。
+  # 所以「補邊 + 1e-4」才是該有的組合。
+  #
+  # ⚠️ 跟 groot_3obj 逐項相同,只差 optimizer_lr —— 這樣兩者的差異才能歸因。
+  groot_3obj_lr4:
+    dataset.repo_id: screamlab/omx_pick_3obj
+    dataset.root: data/lerobot_3obj
+    policy.type: groot
+    policy.base_model_path: nvidia/GR00T-N1.7-3B
+    policy.embodiment_tag: new_embodiment
+    policy.device: cuda
+    policy.push_to_hub: false
+    policy.tune_visual: true
+    policy.optimizer_lr: 1.0e-4     # ← 唯一的差異
+    batch_size: 24
+    steps: 24000
+    save_freq: 3000
+    log_freq: 200
+    num_workers: 4
+    output_dir: outputs/groot_3obj_lr4
+    tensorboard: true
+
+  # 唯一實驗變數是 tune_visual。⚠️ 底下這幾組的成績註解寫的是舊數字,
+  # 2026-08-13 重量後 v1=60% v2=58% v3=35% ACT=92%,見 EVAL_RESULTS.md。
   # 所有可調參數都列在這一組底下。
   groot_v2:
     dataset.repo_id: screamlab/omx_pick_cube
