@@ -364,6 +364,12 @@ def main(argv=None):
                 pos, yaw, r, th = sample_cube_pose(cfg, rng, known.holdout)
             if rec:
                 rec.start(i + 1, pos, yaw)
+            # ⚠️ Announce before running, not after: watching the sim live is
+            # only useful if you know which object it was *asked* for while the
+            # arm is still moving. flush matters -- an episode is ~30 seconds.
+            tag = f" ▶ {instruction_for(cfg, target)!r}" if target else ""
+            print(f"  第 {i + 1:3d} 集{tag}  目標 r={r * 1000:.0f}mm "
+                  f"θ={th:+.0f}°", flush=True)
             ok, steps, why = run_episode(
                 client, policy, pre, post, kin, cfg, pos, yaw,
                 cfg["timing"]["max_episode_steps"], shapes, rec, placements, target)
@@ -371,9 +377,7 @@ def main(argv=None):
             if rec:
                 rec.finish(ok, steps, why)
             wins += ok
-            tag = f"  {instruction_for(cfg, target)!r}" if target else ""
-            print(f"  第 {i + 1:3d} 集{tag}  r={r * 1000:.0f}mm θ={th:+.0f}° "
-                  f"{'✅' if ok else '✗ '} {why} ({steps} 步)", flush=True)
+            print(f"{'':11s}{'✅' if ok else '✗ '} {why} ({steps} 步)", flush=True)
         print(f"\n成功 {wins}/{known.episodes}")
         if placements is not None:
             # ⚠️ Worth separating: "lifted the wrong one" means the arm works and
