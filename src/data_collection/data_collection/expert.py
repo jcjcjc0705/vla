@@ -343,6 +343,14 @@ class ExpertClient(Node):
 
     # ── waiting ────────────────────────────────────────────────────────
     def _wait(self, get, timeout, what, hint):
+        """Block until ``get()`` stops returning None.
+
+        ⚠️ Ready means *not None*, never truthiness: the predicates here return
+        the thing waited for (a joint array, a pose), and ``not ndarray`` raises.
+        A predicate that answers with a plain bool therefore has to return None
+        for "not ready" -- ``False is not None``, so a bool False reads as ready
+        and turns the whole wait into a silent no-op. ``_ready`` wraps that.
+        """
         deadline = time.monotonic() + timeout
         while get() is None:
             if time.monotonic() > deadline:
@@ -350,6 +358,11 @@ class ExpertClient(Node):
                 return False
             time.sleep(0.02)
         return True
+
+    @staticmethod
+    def _ready(flag):
+        """None until ``flag`` is true -- the shape ``_wait`` expects of a bool."""
+        return True if flag else None
 
     def wait_for_joints(self, timeout=15.0):
         return self._wait(
@@ -367,9 +380,9 @@ class ExpertClient(Node):
         """
         want = set(self.object_keys)
         ok = self._wait(
-            lambda: want <= set(self._objs), timeout,
+            lambda: self._ready(want <= set(self._objs)), timeout,
             f"「{self.cfg['ros']['cube_tf_topic']}」上的 {', '.join(sorted(want))} frame",
-            "場景要是 vla/assets/pick_cube.usd(只有它帶物體的 TF 節點)。")
+            f"Isaac 載的場景要跟任務規格一致({self.cfg['paths']['scene_usd']})。")
         if not ok:
             missing = sorted(want - set(self._objs))
             print(f"          缺少的 frame:{missing}")
