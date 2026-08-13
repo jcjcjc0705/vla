@@ -23,6 +23,12 @@ shift || true
 EPISODES=${EPISODES:-20}
 SEEDS=${SEEDS:-"0 1 2"}
 CONTAINER=${CONTAINER:-omx_vla}
+# ⚠️ M5/M6 那四個模型是單一方塊、五台相機 320x240 訓練的。要複測就給
+#     TASK=task/pick_cube_1obj.task.yaml
+# 並在 Isaac 裡載入 assets/pick_cube_1obj.usd。只換場景不夠 —— 相機清單與
+# 解析度是從 task yaml 讀的,不合會安靜地全部失敗(v3 就是這樣全跑 0/480)。
+TASK=${TASK:-}
+TASK_ARG=${TASK:+--task $TASK}
 
 if [ $# -gt 0 ]; then
     CKPTS="$*"
@@ -48,7 +54,7 @@ for c in $CKPTS; do
             source /opt/ros/jazzy/setup.bash
             source /workspaces/install/setup.bash
             cd /vla
-            python3 ml/eval.py \
+            python3 ml/eval.py $TASK_ARG \
                 --checkpoint $RUN/checkpoints/$c/pretrained_model \
                 --episodes $EPISODES --seed $s --holdout 2>&1" \
             | grep -oP '成功 \K[0-9]+/[0-9]+' | tail -1)
