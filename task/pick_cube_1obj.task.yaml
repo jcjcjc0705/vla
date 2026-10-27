@@ -7,7 +7,7 @@
 #     # 重啟 Isaac 載入
 #     python3 ml/eval.py --task task/pick_cube_1obj.task.yaml --checkpoint ...
 #
-# ⚠️ **不要改這個檔。** 改了就對不上那四個模型,EVAL_RESULTS.md 的數字也就
+# ⚠️ **不要改這個檔。** 改了就對不上那四個模型,docs/RESULTS.md 的數字也就
 # 失去可複現性。要調參數請改 pick_cube.task.yaml。
 
 # pick_cube 任務規格 —— 這是唯一該手改的檔案。

@@ -56,7 +56,7 @@ profiles:
   # 沒測過的那一格是「補邊 + 1e-4」—— 見 groot_3obj_lr4。
   #
   # 留著這一組不是因為它對,是因為 step 12000 的 checkpoint 已經存在,
-  # 拿它當 lr 對照組比丟掉划算。詳見 EVAL_RESULTS.md。
+  # 拿它當 lr 對照組比丟掉划算。詳見 docs/RESULTS.md。
   groot_3obj:
     dataset.repo_id: screamlab/omx_pick_3obj
     dataset.root: data/lerobot_3obj
@@ -126,7 +126,7 @@ profiles:
     tensorboard: true
 
   # 唯一實驗變數是 tune_visual。⚠️ 底下這幾組的成績註解寫的是舊數字,
-  # 2026-08-13 重量後 v1=60% v2=58% v3=35% ACT=92%,見 EVAL_RESULTS.md。
+  # 2026-08-13 重量後 v1=60% v2=58% v3=35% ACT=92%,見 docs/RESULTS.md。
   # 所有可調參數都列在這一組底下。
   groot_v2:
     dataset.repo_id: screamlab/omx_pick_cube
