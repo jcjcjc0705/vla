@@ -3,8 +3,8 @@
 Why the system is shaped the way it is. Most of what follows was learned by hitting the problem first;
 the entries marked ⚠️ are the ones that failed *silently*, which is why they are written down.
 
-The primary engineering record is Chinese: [zh/ENGINEERING_BRIEF.md](zh/ENGINEERING_BRIEF.md) and
-[zh/PROGRESS_NOTES.md](zh/PROGRESS_NOTES.md). This is the distilled English version.
+Distilled from the internal engineering notes kept during development, which are not part of this
+repository. The measured results they refer to are in [RESULTS.md](RESULTS.md).
 
 ---
 

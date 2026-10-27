@@ -231,7 +231,7 @@ hardware the numbers were measured on, and the end-to-end command sequence.
 | [docs/RESULTS.md](docs/RESULTS.md) | Held-out evaluation, per-checkpoint scans, the three bugs, every withdrawn claim |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, kinematics, physics parameters, dataset format, invariants |
 | [docs/SETUP.md](docs/SETUP.md) | Dependencies, the image contract, how to run each stage |
-| [docs/zh/](docs/zh/) | The original Chinese engineering record this was distilled from |
+| [docs/zh/](docs/zh/) | The original Chinese decision log and results record |
 
 Environment the numbers were measured on: Isaac Sim 5.1.0-rc.19 · LeRobot 0.6.1 · torch 2.11.0+cu128 ·
 NVIDIA RTX PRO 6000 Blackwell (96 GB).

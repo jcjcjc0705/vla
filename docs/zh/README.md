@@ -9,8 +9,7 @@
 要做的事:讓 omx_follower 在 Isaac 裡學會把方塊夾起來,**模型只能看影像、不能知道方塊
 座標**,最後微調 NVIDIA 的 GR00T。
 
-這份是決策與進度用的。實作細節在 [`ENGINEERING_BRIEF.md`](ENGINEERING_BRIEF.md),
-那份是要複製給伺服器上的 Claude 的。
+這份是決策與進度用的。實作細節見英文的 [`../DESIGN.md`](../DESIGN.md)。
 
 ---
 
@@ -132,7 +131,7 @@ data/lerobot_3cam/   486 集 / 100,096 幀,front_left + front_right + wrist
 4. 相機對照:目前轉的是 3 台,同一份 `data/raw/` 可以再轉 2 台或 5 台的版本比較
    (`ml/convert.py --cameras`),不必重錄。
 
-實作細節在 [`ENGINEERING_BRIEF.md`](ENGINEERING_BRIEF.md)。
+實作細節見英文的 [`../DESIGN.md`](../DESIGN.md)。
 
 ---
 
